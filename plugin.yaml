@@ -1,0 +1,8 @@
+name: research-os
+version: "0.1.0"
+description: "Research-thinking controller: the agent opens research mode itself, and a pre_llm_call hook enforces claim-typed writing (observation / report / inference / hypothesis) against a per-topic evidence ledger."
+author: "tweb"
+license: MIT
+manifest_version: 1
+hooks:
+  - pre_llm_call

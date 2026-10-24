@@ -1,0 +1,389 @@
+"""Research OS — a research-thinking controller for Hermes.
+
+Two moving parts:
+
+  research_mode  (tool)  the agent opens and closes research mode itself, and
+                           manages topics (create / list / switch / delete).
+  pre_llm_call   (hook)  while a session is in research mode, injects the
+                           topic's core question, competing explanations, the
+                           claim ledger digest, and the four-claim-type
+                           discipline. The user never sees this text.
+
+The tool is the switch; the hook is the reflex. The agent decides to enter
+research mode (it has context the hook lacks: what the user actually wants),
+and the hook then changes how the agent behaves for the rest of the session.
+
+Everything fails open. A broken Research OS must degrade to "a normal agent",
+never to "a stalled agent".
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import traceback
+from pathlib import Path
+from typing import Any
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+try:
+    import classify as _classify
+    import protocol as _protocol
+    import state as _state
+except ImportError:  # loaded as a package (repo layout: research_os/)
+    from . import classify as _classify  # type: ignore[no-redef]
+    from . import protocol as _protocol  # type: ignore[no-redef]
+    from . import state as _state  # type: ignore[no-redef]
+
+
+# ---------------------------------------------------------------------------
+# tool implementation
+# ---------------------------------------------------------------------------
+
+TOOL_SCHEMA: dict[str, Any] = {
+    "name": "research_mode",
+    "description": (
+        "Control research mode for this conversation, and manage research topics. "
+        "ACTION 'on'/'switch' enter or switch topic (requires an existing topic name). "
+        "ACTION 'off' leaves research mode. ACTION 'list' lists topics. "
+        "ACTION 'create' makes a new topic (requires project + core_question). "
+        "ACTION 'delete' removes a topic (soft delete by default). "
+        "ACTION 'status' reports the current mode. "
+        "ACTION 'claim' records a claim in the topic ledger (kind: observation/report/"
+        "inference/hypothesis) and ACTION 'validate' checks the ledger. "
+        "Call 'on' when the user asks a genuine research question (why / evidence / "
+        "compare / hypothesis / mechanism / literature), when reviewing literature, or "
+        "when a claim needs verification. Do NOT call for chores: file conversion, "
+        "imports, formatting, installs, unrelated debugging, or short factual lookups."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "on", "off", "status", "list", "create", "switch",
+                    "delete", "claim", "validate", "repair",
+                ],
+                "description": "What to do.",
+            },
+            "project": {
+                "type": "string",
+                "description": "Topic name. Required for on/switch/create/delete/claim/validate.",
+            },
+            "core_question": {
+                "type": "string",
+                "description": "The scientific question this topic addresses. Required for create.",
+            },
+            "hypotheses": {
+                "type": "string",
+                "description": (
+                    "Initial competing explanations for create, separated by ' | ' "
+                    "(a single string — Hermes mangles array arguments)."
+                ),
+            },
+            "tags": {
+                "type": "string",
+                "description": "Domain tags for create, separated by ', '.",
+            },
+            "permanent": {
+                "type": "boolean",
+                "description": "For delete: skip the trash and remove outright. Default false.",
+            },
+            "claim": {
+                "type": "object",
+                "description": "For action 'claim': the claim to record.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["observation", "report", "inference", "hypothesis"],
+                    },
+                    "content": {"type": "string"},
+                    "inference_type": {
+                        "type": "string",
+                        "enum": ["descriptive", "explanatory", "predictive", "analogy", "abductive"],
+                    },
+                    "strength": {
+                        "type": "string",
+                        "enum": ["descriptive", "suggestive", "strong", "established"],
+                    },
+                    "premises": {
+                        "type": "string",
+                        "description": (
+                            "Claim ids this rests on, separated by ' ' (inference only). "
+                            "Example: 'L1 L2'."
+                        ),
+                    },
+                    "source": {"type": "string", "description": "PMID/DOI/paper (observation/report)."},
+                    "status": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["kind", "content"],
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
+def _split_list(value: Any, sep: str = "|") -> list[str]:
+    """Normalize a list-ish argument into a list of non-empty strings.
+
+    Hermes' argument coercion can hand a plugin several shapes for the same
+    field: the declared list, a bare dict wrapped in a list, or a single string.
+    All of them are accepted here so a model that guesses wrong still lands.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = value.split(sep)
+    elif isinstance(value, dict):
+        inner = value.get("item", value)
+        if isinstance(inner, str):
+            parts = inner.split(sep)
+        elif isinstance(inner, list):
+            parts = [str(x) for x in inner]
+        else:
+            parts = [str(inner)]
+    elif isinstance(value, list):
+        flat: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                inner = item.get("item", item)
+                if isinstance(inner, list):
+                    flat.extend(str(x) for x in inner)
+                elif isinstance(inner, str):
+                    flat.extend(inner.split(sep))
+                else:
+                    flat.append(str(inner))
+            elif isinstance(item, str):
+                flat.extend(item.split(sep))
+            else:
+                flat.append(str(item))
+        parts = flat
+    else:
+        parts = [str(value)]
+    return [p.strip() for p in parts if p and str(p).strip()]
+
+
+def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    action = str(args.get("action") or "status").strip().lower()
+    project = str(args.get("project") or "").strip()
+    session_id = str(kwargs.get("session_id") or args.get("session_id") or "unknown")
+
+    def ok(payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    def fail(msg: str) -> str:
+        return json.dumps({"error": msg}, ensure_ascii=False)
+
+    try:
+        if action == "status":
+            s = _state.read_session(session_id)
+            topics = _state.list_topics()
+            return ok({
+                "mode": s.get("mode", "idle"),
+                "topic": s.get("topic", ""),
+                "topics": [t["name"] for t in topics],
+            })
+
+        if action == "list":
+            topics = _state.list_topics()
+            return ok({
+                "topics": [
+                    {
+                        "name": t["name"],
+                        "core_question": t.get("core_question", ""),
+                        "tags": t.get("tags", []),
+                        "state_ok": bool(_state.read_map(t["name"])),
+                    }
+                    for t in topics
+                ]
+            })
+
+        if action == "repair":
+            # Rebuild state directories that went missing while the registry
+            # still lists the topic.
+            fixed: list[str] = []
+            for t in _state.list_topics():
+                if _state.read_map(t["name"]):
+                    continue
+                _state.write_map(
+                    t["name"],
+                    {
+                        "topic": t["name"],
+                        "core_question": t.get("core_question", ""),
+                        "hypotheses": t.get("hypotheses", []),
+                        "tags": t.get("tags", []),
+                        "open_questions": [],
+                    },
+                )
+                fixed.append(t["name"])
+            return ok({"repaired": fixed})
+
+        if action == "create":
+            if not project:
+                return fail("project is required")
+            if not args.get("core_question"):
+                return fail(
+                    "core_question is required: a topic without a scientific question "
+                    "is not a research topic — state the question first"
+                )
+            hyp = _split_list(args.get("hypotheses"), sep="|")
+            tags = _split_list(args.get("tags"), sep=",")
+            meta = _state.create_topic(
+                project,
+                str(args.get("core_question")),
+                hyp,
+                tags,
+            )
+            return ok({"created": project, **meta})
+
+        if action == "delete":
+            if not project:
+                return fail("project is required")
+            dest = _state.delete_topic(project, permanent=bool(args.get("permanent")))
+            s = _state.read_session(session_id)
+            if s.get("topic") == project:
+                _state.set_session_mode(session_id, "idle")
+            return ok({"deleted": project, "trashed_to": dest, "permanent": bool(args.get("permanent"))})
+
+        if action in ("on", "switch"):
+            if not project:
+                return fail("project is required: name the topic to work on")
+            if not _state.topic_exists(project):
+                return fail(
+                    f"no such topic: {project!r}. Call action='list' to see topics, "
+                    "or action='create' to make one (it needs a core_question)"
+                )
+            m = _state.read_map(project)
+            if not m:
+                # The registry knows the topic but its state directory is gone.
+                # Rebuild it from the registry rather than entering an empty topic.
+                reg = next(
+                    (t for t in _state.list_topics() if t["name"] == project), {}
+                )
+                m = {
+                    "topic": project,
+                    "core_question": reg.get("core_question", ""),
+                    "hypotheses": reg.get("hypotheses", []),
+                    "tags": reg.get("tags", []),
+                    "open_questions": [],
+                }
+                _state.write_map(project, m)
+            s = _state.read_session(session_id)
+            previous = s.get("topic", "")
+            _state.set_session_mode(session_id, "research", project)
+            m = _state.read_map(project)
+            hint = ""
+            if previous and previous != project:
+                hint = (
+                    f" Switched from {previous} to {project}. Do not carry hypotheses "
+                    f"or claims over from {previous}."
+                )
+            return ok({
+                "mode": "research",
+                "topic": project,
+                "core_question": m.get("core_question", ""),
+                "hypotheses": m.get("hypotheses", []),
+                "note": hint.strip(),
+            })
+
+        if action == "off":
+            _state.set_session_mode(session_id, "idle")
+            return ok({"mode": "idle", "topic": ""})
+
+        if action == "claim":
+            if not project:
+                return fail("project is required")
+            claim = dict(args.get("claim") or {})
+            if not claim.get("content"):
+                return fail("claim.content is required")
+            claim["premises"] = " ".join(_split_list(claim.get("premises"), sep=" "))
+            row = _state.append_claim(project, claim)
+            return ok({"recorded": row})
+
+        if action == "validate":
+            if not project:
+                return fail("project is required")
+            try:
+                from .validate import format_report, validate_claims  # type: ignore
+            except ImportError:
+                from validate import format_report, validate_claims  # type: ignore
+
+            report = validate_claims(project)
+            return ok({"report": format_report(report), "detail": report})
+
+        return fail(f"unknown action: {action!r}")
+    except Exception as exc:  # fail open — never break the agent's turn
+        return fail(f"{type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# hook: pre_llm_call
+# ---------------------------------------------------------------------------
+
+
+def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
+    try:
+        cfg = _state.load_config()
+        if not cfg.get("inject_protocol", True):
+            return None
+
+        session_id = str(kwargs.get("session_id") or "unknown")
+        message = kwargs.get("user_message") or ""
+        if isinstance(message, (list, dict)):
+            message = json.dumps(message, ensure_ascii=False)
+        message = str(message)
+
+        s = _state.read_session(session_id)
+        mode = s.get("mode", "idle")
+        topic = s.get("topic", "")
+
+        # Re-classify every turn: a chore inside a research session must not
+        # carry the protocol, and a research question in an idle session should
+        # still get a nudge (never an automatic switch — the agent decides).
+        detected = _classify.classify(message, s)
+
+        if detected == "chore" and mode == "research":
+            _state.set_session_mode(session_id, "chore", topic)
+            mode, topic = "chore", topic
+
+        if mode == "research" and topic and _state.topic_exists(topic):
+            ctx = _protocol.build_research_block(topic, cfg)
+        elif detected == "research":
+            # Nudge only. The agent must call the tool itself.
+            topics = [t["name"] for t in _state.list_topics()]
+            hint = ", ".join(topics) if topics else "(none yet — create one with action='create')"
+            ctx = (
+                "[Research OS · idle]\n"
+                "这轮看起来是研究问题，但当前不在科研模式。"
+                f"先调 research_mode(action='on', project='<topic>') 进入课题，再按四类断言回答。"
+                f"可用课题：{hint}"
+            )
+        else:
+            return None
+
+        return {"context": ctx}
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# registration
+# ---------------------------------------------------------------------------
+
+
+def register(ctx: Any) -> None:
+    ctx.register_tool(
+        name="research_mode",
+        toolset="research_os",
+        schema=TOOL_SCHEMA,
+        handler=_tool_handler,
+        description="Research mode switch and topic manager.",
+        emoji="🔬",
+    )
+    ctx.register_hook("pre_llm_call", _pre_llm_call)

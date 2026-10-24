@@ -359,6 +359,11 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 _state.write_map(project, m)
             s = _state.read_session(session_id)
             previous = s.get("topic", "")
+            # A new question on the topic starts a new count: the search run
+            # that triggered the convergence check belonged to the previous
+            # question, not to this one.
+            if previous != project:
+                _state.reset_topic_searches(project)
             _state.set_session_mode(session_id, "research", project)
             m = _state.read_map(project)
             hint = ""
@@ -538,6 +543,56 @@ SEARCH_TOOLS = (
 )
 
 
+def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
+    """Interrupt a search run that is not converging.
+
+    A live run searched fifty times across three turns, recorded nothing and
+    never produced an answer. The counter is per topic, because that is how
+    the run actually accumulated.
+
+    The check interrupts, it does not forbid: the agent is asked to record
+    what it has or to say what it will conclude, and then it may search again.
+    It interrupts at most twice per topic — after that it lets the work
+    through, because a hook that keeps refusing the same tool is a stall, and
+    a stall is worse than a long search.
+    """
+    try:
+        cfg = _state.load_config()
+        threshold = int(cfg.get("searches_before_converge") or 0)
+        if threshold <= 0:
+            return None
+        count = _state.topic_search_count(topic)
+        if count < threshold:
+            return None
+        reminded = _state.topic_search_reminded(topic)
+        if reminded >= 2:
+            return None
+
+        claims = _state.read_claims(topic)
+        _state.note_topic_reminder(topic)
+
+        if claims:
+            body = (
+                f"这个课题已经检索了 {count} 次，账本里有 {len(claims)} 条断言。\n"
+                f"先把手里够用的证据用 research_mode(action='claim') 记下来"
+                f"（观察和转述填 source，推论填 premises 和 inference_type），"
+                f"然后用现有证据给出结论——不要为了再找一篇而无限检索。"
+            )
+        else:
+            body = (
+                f"这个课题已经检索了 {count} 次，但账本还是空的，回答也还没写出来。\n"
+                f"先停下来：用 research_mode(action='claim') 记下你已经找到的关键证据，"
+                f"或者直接就现有证据给出结论并说明哪些地方证据不足。"
+                f"继续检索不会让答案自己出现。"
+            )
+        return {
+            "action": "block",
+            "message": f"[Research OS · 该收口了]\n{body}",
+        }
+    except Exception:
+        return None
+
+
 def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """Hold a literature search until the agent has a topic to put it in.
 
@@ -555,7 +610,10 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         session_id = str(kwargs.get("session_id") or "unknown")
         s = _state.read_session(session_id)
         if s.get("mode") == "research" and s.get("topic"):
-            return None
+            # The topic is open. A run that searches forever and never answers
+            # is the failure this catches: interrupt, ask for a record or a
+            # conclusion, then let the work continue.
+            return _convergence_check(session_id, str(s.get("topic") or ""))
 
         # pre_tool_call cannot see the user message or the conversation. The
         # turn's synthetic/not verdict was recorded by pre_llm_call, which runs
@@ -611,6 +669,11 @@ def _post_tool_call(**kwargs: Any) -> None:
             is_evidence=tool_name in _audit.EVIDENCE_TOOLS,
             is_ledger=is_ledger,
         )
+        if tool_name in _audit.EVIDENCE_TOOLS:
+            s = _state.read_session(session_id)
+            topic = str(s.get("topic") or "")
+            if topic and s.get("mode") == "research":
+                _state.note_topic_search(topic, tool_name)
         return None
     except Exception:
         return None

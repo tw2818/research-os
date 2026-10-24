@@ -462,6 +462,141 @@ def test_next_turn_reports_the_previous_gap():
     assert "账本还是空的" in out["context"], out["context"][-400:]
 
 
+# --------------------------------------------------------------------------
+# convergence
+# --------------------------------------------------------------------------
+
+
+def _search_n(m, sid, topic, n):
+    for _ in range(n):
+        m._post_tool_call(
+            tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+        )
+
+
+def test_convergence_check_silent_below_the_threshold():
+    m = _handler()
+    sid = "t-conv1"
+    m._tool_handler(
+        {"action": "create", "project": "ConvTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ConvTopic"}, session_id=sid)
+    _search_n(m, sid, "ConvTopic", 3)
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    assert out is None, out
+
+
+def test_convergence_check_interrupts_a_runaway_search():
+    m = _handler()
+    sid = "t-conv2"
+    m._tool_handler(
+        {"action": "create", "project": "ConvTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ConvTopic2"}, session_id=sid)
+    _search_n(m, sid, "ConvTopic2", 25)
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "收口" in out["message"]
+    assert "账本" in out["message"]
+
+
+def test_convergence_check_stops_after_two_reminders():
+    """A hook that keeps refusing the same tool is a stall, and a stall is
+    worse than a long search."""
+    m = _handler()
+    sid = "t-conv3"
+    m._tool_handler(
+        {"action": "create", "project": "ConvTopic3", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ConvTopic3"}, session_id=sid)
+    _search_n(m, sid, "ConvTopic3", 25)
+    first = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    second = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    third = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    assert first is not None
+    assert second is not None
+    assert third is None, third
+
+
+def test_convergence_check_can_be_turned_off():
+    m = _handler()
+    sid = "t-conv4"
+    m._tool_handler(
+        {"action": "create", "project": "ConvTopic4", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ConvTopic4"}, session_id=sid)
+    _search_n(m, sid, "ConvTopic4", 40)
+    state.save_config({"searches_before_converge": 0})
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    assert out is None, out
+    state.save_config({"searches_before_converge": 20})
+
+
+def test_search_count_is_per_topic():
+    m = _handler()
+    sid = "t-conv5"
+    for name in ("ConvA", "ConvB"):
+        m._tool_handler(
+            {"action": "create", "project": name, "core_question": "Q?"},
+            session_id=sid,
+        )
+    m._tool_handler({"action": "on", "project": "ConvA"}, session_id=sid)
+    _search_n(m, sid, "ConvA", 4)
+    assert state.topic_search_count("ConvA") == 4
+    assert state.topic_search_count("ConvB") == 0
+
+
+def test_switching_topic_does_not_erase_the_old_topic_s_count():
+    """The count belongs to the topic: those searches really were run against
+    that topic's question. Switching away must not make them disappear."""
+    m = _handler()
+    sid = "t-conv6"
+    for name in ("ConvC", "ConvD"):
+        m._tool_handler(
+            {"action": "create", "project": name, "core_question": "Q?"},
+            session_id=sid,
+        )
+    m._tool_handler({"action": "on", "project": "ConvC"}, session_id=sid)
+    _search_n(m, sid, "ConvC", 22)
+    assert state.topic_search_count("ConvC") == 22
+    m._tool_handler({"action": "on", "project": "ConvD"}, session_id=sid)
+    assert state.topic_search_count("ConvC") == 22
+    assert state.topic_search_count("ConvD") == 0
+
+
+def test_re_entering_a_topic_starts_a_fresh_count():
+    """Coming back to a topic with a new question is a new run."""
+    m = _handler()
+    sid = "t-conv7"
+    for name in ("ConvE", "ConvF"):
+        m._tool_handler(
+            {"action": "create", "project": name, "core_question": "Q?"},
+            session_id=sid,
+        )
+    m._tool_handler({"action": "on", "project": "ConvE"}, session_id=sid)
+    _search_n(m, sid, "ConvE", 22)
+    m._tool_handler({"action": "on", "project": "ConvF"}, session_id=sid)
+    m._tool_handler({"action": "on", "project": "ConvE"}, session_id=sid)
+    assert state.topic_search_count("ConvE") == 0
+
+
 def test_transform_llm_output_flags_unaccounted_assertions():
     m = _handler()
     sid = "t-transform"

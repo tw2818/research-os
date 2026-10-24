@@ -145,3 +145,19 @@ ledger, so nothing had checked whether it was an observation or an
 inference.
 
 76 tests.
+
+### Added (v0.2.1)
+
+- **Convergence check** — the search count is kept per topic, and once a
+  topic passes `searches_before_converge` (default 20) the next search is
+  interrupted with a request to record what has been found or to say what
+  will be concluded. The check interrupts at most twice per topic: after that
+  it lets the work through, because a hook that keeps refusing the same tool
+  is a stall, and a stall is worse than a long search. Set the threshold to
+  0 to turn it off.
+
+  This came from a live run that searched fifty times across three turns,
+  recorded nothing, and never produced an answer.
+
+- The count belongs to the topic, so switching away does not erase it, and
+  coming back with a new question starts a fresh count.

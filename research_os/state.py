@@ -77,6 +77,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "obsidian_enabled": True,
     "inject_protocol": True,
     "max_inject_chars": 900,
+    # How many literature searches one topic may run before the agent is asked
+    # to record what it has or to say what it will conclude. This is a
+    # prompt, not a wall: 0 turns the check off. The default is generous —
+    # a broad literature sweep is legitimate — and the point is to catch the
+    # run that searches forty times and never answers.
+    "searches_before_converge": 20,
 }
 
 
@@ -435,6 +441,67 @@ def note_tool_activity(
     s["turn_activities"] = turns
     s["updated_at"] = now()
     write_session(session_id, s)
+
+
+def note_topic_search(topic: str, tool_name: str = "") -> int:
+    """Count a literature search against the topic. Returns the new count.
+
+    The count is per topic, not per turn: a run that searches fifty times
+    across three turns and never answers is the failure this catches, and a
+    per-turn counter would reset exactly when it matters.
+    """
+    if not topic:
+        return 0
+    d = topic_dir(topic)
+    if not d.is_dir():
+        return 0
+    path = d / "search-count.json"
+    data = _read_json(path, {"count": 0, "tools": [], "reminded": 0})
+    data["count"] = int(data.get("count") or 0) + 1
+    tools = data.setdefault("tools", [])
+    if tool_name and len(tools) < 60:
+        tools.append(tool_name)
+    data["updated_at"] = now()
+    _write_json(path, data)
+    return int(data["count"])
+
+
+def topic_search_count(topic: str) -> int:
+    if not topic:
+        return 0
+    path = topic_dir(topic) / "search-count.json"
+    return int(_read_json(path, {}).get("count") or 0)
+
+
+def topic_search_reminded(topic: str) -> int:
+    """How many times the convergence check has already interrupted this topic."""
+    if not topic:
+        return 0
+    path = topic_dir(topic) / "search-count.json"
+    return int(_read_json(path, {}).get("reminded") or 0)
+
+
+def note_topic_reminder(topic: str) -> int:
+    if not topic:
+        return 0
+    path = topic_dir(topic) / "search-count.json"
+    data = _read_json(path, {"count": 0, "tools": []})
+    data["reminded"] = int(data.get("reminded") or 0) + 1
+    _write_json(path, data)
+    return int(data["reminded"])
+
+
+def reset_topic_searches(topic: str) -> None:
+    """Reset the search counter, e.g. when a new question opens on the topic."""
+    if not topic:
+        return
+    d = topic_dir(topic)
+    if not d.is_dir():
+        return
+    _write_json(
+        d / "search-count.json",
+        {"count": 0, "tools": [], "reminded": 0, "updated_at": now()},
+    )
 
 
 def turn_activity(session_id: str, turn_id: str) -> dict[str, Any]:

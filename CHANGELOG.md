@@ -106,3 +106,42 @@ First working version.
   conclusion.
 
 41 tests.
+
+### Added (v0.2.0)
+
+- **`post_tool_call` hook** — accumulates what the turn did, per turn id: how
+  many evidence tools it used, and how many claims it wrote. A claim write
+  counts only when the call was `action=claim` with content; creating or
+  opening a topic is a different act.
+- **`transform_llm_output` hook** — checks the outgoing answer against the
+  ledger and appends a note listing the assertions that were never
+  recorded. The answer itself is not rewritten. An empty ledger means every
+  assertion is unaccounted for, which is the case worth flagging.
+- **Gap report on the next turn** — when the previous turn gathered evidence
+  and recorded nothing, the next turn's injected context says so before the
+  agent builds another answer on top of it.
+- **Private module namespace** — the implementation modules load under
+  `research_os_impl.*` instead of flat top-level names, so they cannot
+  collide with another plugin's `state.py` and cannot go stale behind a
+  reloaded entry module.
+- **Stale bytecode dropped on load** — a `.pyc` survives an edit that lands
+  in the same second and leaves the size unchanged, and the old bytecode then
+  runs against the new source. The loader removes it before each import.
+
+### Verified end-to-end
+
+A live run against PubMed: the agent named its own topic
+(`Wang 2016 the topic it opened meta-analysis`), wrote four claims
+with the correct kinds — a `report` for the study itself, two
+`observation`s carrying effect sizes, an `inference` with `premises L1 L2 L3`
+— then found a second paper and recorded it as L5 with PMID and DOI, `pending`.
+In the answer it labelled observations and inferences inline and flagged the
+print-year versus online-year discrepancy itself.
+
+The output check then caught the one thing the agent said in prose but did
+not record: the sentence about late-onset deficits implying vascular and
+neurodegenerative factors. That sentence is in the answer and not in the
+ledger, so nothing had checked whether it was an observation or an
+inference.
+
+76 tests.

@@ -44,6 +44,39 @@ CHORE_OBJECT = (
 
 _QUESTION_MARK = re.compile(r"[?？]|吗|呢|如何|怎么|是不是|有没有|该不该|行不行")
 
+# The user asking to leave research mode. Hermes intercepts slash commands it
+# does not know ("/research off" comes back as "Unknown command"), so the
+# switch has to work in plain language. These phrasings are the ones a person
+# actually uses.
+_EXIT_PHRASES = (
+    "退出科研模式", "退出研究模式", "退出课题", "关掉科研模式", "关闭科研模式",
+    "结束科研模式", "结束研究模式", "结束这个课题", "结束课题",
+    "退出研究", "退出科研", "先退出", "别做研究了", "不研究了",
+    "leave research mode", "exit research mode", "stop research mode",
+    "turn off research mode", "leave the topic", "exit the topic",
+)
+
+# A phrase that only reads as an exit in context. "结束" alone could mean
+# "finish this analysis", so it needs a research-mode noun nearby.
+_EXIT_CONTEXT = re.compile(
+    r"(退出|结束|关闭|关掉|停止|不做|别做|收工|收一下).{0,6}"
+    r"(科研模式|研究模式|课题|研究|科研|topic|research mode)"
+    r"|(科研模式|研究模式|课题|research mode).{0,6}(退出|结束|关闭|关掉|停止)",
+    re.IGNORECASE,
+)
+
+
+def is_exit_request(message: str) -> bool:
+    """True when the user is asking to leave research mode."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    for phrase in _EXIT_PHRASES:
+        if phrase in low:
+            return True
+    return bool(_EXIT_CONTEXT.search(text))
+
 # System-generated turns are not user turns. Hermes injects these as user
 # messages (background-process completions, async batch notices, skill-index
 # updates, memory recalls). Their bodies quote the original command, so they

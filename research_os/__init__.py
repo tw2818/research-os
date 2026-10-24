@@ -96,7 +96,8 @@ TOOL_SCHEMA: dict[str, Any] = {
         "Research mode switch and topic manager. CALL THIS BEFORE answering a "
         "research question or before running a literature search. "
         "ACTION 'on'/'switch' enter or switch topic (needs an existing topic name). "
-        "ACTION 'off' leaves research mode. ACTION 'list' lists topics. "
+        "ACTION 'off' leaves research mode. "
+        "ACTION 'list' lists topics. "
         "ACTION 'create' makes a new topic (needs project + core_question — a topic "
         "without a scientific question is not a research topic). "
         "ACTION 'delete' removes a topic (soft delete by default). "
@@ -342,7 +343,9 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             })
 
         if action == "off":
-            _state.set_session_mode(session_id, "idle")
+            # Clear the topic too: a stale topic makes the next "on" report a
+            # switch that never happened.
+            _state.set_session_mode(session_id, "idle", clear_topic=True)
             return ok({"mode": "idle", "topic": ""})
 
         if action == "claim":
@@ -403,6 +406,13 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         s = _state.read_session(session_id)
         mode = s.get("mode", "idle")
         topic = s.get("topic", "")
+
+        # The user asked to leave research mode. Turn it off here — the agent
+        # cannot be relied on to call the tool for its own exit — and inject
+        # nothing: leaving should be silent.
+        if mode == "research" and _classify.is_exit_request(message):
+            _state.set_session_mode(session_id, "idle", clear_topic=True)
+            return None
 
         # Re-classify every turn: a chore inside a research session must not
         # carry the protocol, and a research question in an idle session should

@@ -332,11 +332,23 @@ def write_session(session_id: str, data: dict[str, Any]) -> None:
     _write_json(session_path(session_id), data)
 
 
-def set_session_mode(session_id: str, mode: str, topic: str = "") -> dict[str, Any]:
+def set_session_mode(
+    session_id: str, mode: str, topic: str = "", clear_topic: bool = False
+) -> dict[str, Any]:
+    """Set the session's mode and topic.
+
+    `topic` is written when given, and cleared when `clear_topic` is set. A
+    caller that only wants to change the mode must not accidentally drop the
+    topic, and a caller that wants to leave research mode must not leave a
+    stale topic behind — the next "on" would otherwise report a switch that
+    never happened.
+    """
     s = read_session(session_id)
     s["mode"] = mode
     if topic:
         s["topic"] = topic
+    elif clear_topic:
+        s["topic"] = ""
     s["updated_at"] = now()
     write_session(session_id, s)
     return s

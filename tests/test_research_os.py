@@ -220,6 +220,103 @@ def test_idle_for_unclear():
 
 
 # --------------------------------------------------------------------------
+# leaving research mode
+# --------------------------------------------------------------------------
+
+
+def test_exit_request_detection():
+    for phrase in (
+        "退出科研模式",
+        "退出这个课题",
+        "关掉研究模式",
+        "结束课题吧",
+        "先退出",
+        "leave research mode",
+    ):
+        assert classify.is_exit_request(phrase), phrase
+
+
+def test_exit_request_not_triggered_by_ordinary_text():
+    for phrase in (
+        "结束这个分析",
+        "把结论写完",
+        "关闭文件",
+        "研究一下这个课题的机制",   # research question, not an exit
+        "帮我把 pdf 转成 md",
+    ):
+        assert not classify.is_exit_request(phrase), phrase
+
+
+def test_off_clears_the_topic():
+    m = _handler()
+    import json
+    m._tool_handler(
+        {"action": "create", "project": "OffTopic", "core_question": "Q?"},
+        session_id="t-off",
+    )
+    m._tool_handler({"action": "on", "project": "OffTopic"}, session_id="t-off")
+    m._tool_handler({"action": "off"}, session_id="t-off")
+    s = state.read_session("t-off")
+    assert s["mode"] == "idle"
+    assert s.get("topic", "") == "", s
+
+
+def test_on_after_off_does_not_report_a_switch():
+    m = _handler()
+    import json
+    m._tool_handler(
+        {"action": "create", "project": "OffTopic2", "core_question": "Q?"},
+        session_id="t-off2",
+    )
+    m._tool_handler({"action": "on", "project": "OffTopic2"}, session_id="t-off2")
+    m._tool_handler({"action": "off"}, session_id="t-off2")
+    out = json.loads(m._tool_handler({"action": "on", "project": "OffTopic2"}, session_id="t-off2"))
+    assert "Switched from" not in out.get("note", ""), out
+
+
+def test_exit_request_turns_the_mode_off():
+    m = _handler()
+    sid = "t-exit"
+    m._tool_handler(
+        {"action": "create", "project": "ExitTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ExitTopic"}, session_id=sid)
+    out = m._pre_llm_call(
+        session_id=sid, user_message="退出科研模式", turn_id="turn-1"
+    )
+    assert out is None, out
+    s = state.read_session(sid)
+    assert s["mode"] == "idle", s
+    assert s.get("topic", "") == "", s
+
+
+def test_exit_in_idle_session_is_harmless():
+    m = _handler()
+    out = m._pre_llm_call(
+        session_id="t-exit2", user_message="退出科研模式", turn_id="turn-1"
+    )
+    assert out is None, out
+
+
+def test_research_question_after_exit_gets_the_nudge_again():
+    """After leaving, a new research question must be able to re-enter."""
+    m = _handler()
+    sid = "t-exit3"
+    m._tool_handler(
+        {"action": "create", "project": "Reenter", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "Reenter"}, session_id=sid)
+    m._pre_llm_call(session_id=sid, user_message="退出科研模式", turn_id="t1")
+    out = m._pre_llm_call(
+        session_id=sid, user_message="证据能区分这两种解释吗？", turn_id="t2"
+    )
+    assert out is not None
+    assert "需要先进入课题" in out["context"], out["context"][:200]
+
+
+# --------------------------------------------------------------------------
 # accounting: evidence used but not recorded
 # --------------------------------------------------------------------------
 

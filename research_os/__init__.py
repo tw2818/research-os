@@ -99,6 +99,18 @@ def _drop_bytecode(path: Path) -> None:
             pass
 
 
+# The package is imported both as a plugin (the loader drops the cached
+# bytecode for each file) and as a package by the tests and the scripts, and
+# the second path is not covered. A .pyc is validated against the source's
+# mtime and size, and an edit that lands in the same second and leaves the
+# size unchanged passes that check — the old bytecode then runs against the
+# new source, silently. Drop it here, before anything is imported.
+for _cached in Path(__file__).resolve().parent.glob("__pycache__/*.pyc"):
+    try:
+        _cached.unlink()
+    except OSError:
+        pass
+
 try:
     _audit, _classify, _protocol, _state, _validate = _load_impl_modules()
 except Exception:  # pragma: no cover - package layout (repo / tests)
@@ -782,25 +794,103 @@ def _is_state_path(path: str) -> bool:
 
 
 def _mentions_state_tree(text: str) -> bool:
-    """True when a command both names the state tree and writes to it.
+    """True when a command writes to the state tree.
 
     Reading the state is how the agent finds out what is already recorded, so
     a read must not be blocked. Only a write is.
+
+    The check is on the write target, not on whether the path appears
+    anywhere: a command that reads the ledger and writes a summary to
+    /tmp mentions the state tree and is not touching it.
     """
     if not text:
         return False
+    for span in _state_tree_spans(text):
+        if _is_write_target(text, span):
+            return True
+    return False
+
+
+def _state_tree_spans(text: str) -> list[tuple[int, int]]:
+    """Where the state tree is named in the text."""
+    spans: list[tuple[int, int]] = []
     try:
         home = str(_state.HOME.resolve())
     except Exception:
-        return False
+        home = ""
     lowered = text.lower()
-    mentions = home.lower() in lowered or any(
-        marker in lowered
-        for marker in _STATE_TREE_MARKERS
-    )
-    if not mentions:
+    if home:
+        needle = home.lower()
+        start = 0
+        while True:
+            idx = lowered.find(needle, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(needle)))
+            start = idx + 1
+    for marker in _STATE_TREE_MARKERS:
+        needle = marker.lower()
+        start = 0
+        while True:
+            idx = lowered.find(needle, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(needle)))
+            start = idx + 1
+    # Merge overlaps so a path that matches both the home and a marker is
+    # examined once.
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for begin, end in spans:
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((begin, end))
+    return merged
+
+
+# What makes a path a write target rather than a source.
+_WRITE_BEFORE = (
+    ">", "tee ", "sed -i", "truncate ", "dd ", "shred ", "install ",
+    "rm ", "unlink",
+)
+_WRITE_AFTER = (
+    "'w'", '"w"', "'a'", '"a"', "'w+'", '"w+"', "'a+'", '"a+"',
+    "'x'", '"x"', "'wb'", '"wb"', "'ab'", '"ab"',
+    "write_text", "write_bytes", "writelines", "writerow", "dump(",
+)
+# Operations that move or copy: the state tree path may be the source, so
+# these are treated as writes when the tree is named at all.
+_MOVING_OPS = ("cp ", "mv ", "rsync ", "install ", "scp ")
+
+
+def _is_write_target(text: str, span: tuple[int, int]) -> bool:
+    begin, end = span
+    # The window before the path must not cross a heredoc body: a command
+    # that writes a script to /tmp and quotes a state path inside it is
+    # writing to /tmp.
+    before = text[max(0, begin - 200):begin].lower()
+    # Only the current line matters: a heredoc that started on an earlier
+    # line has its body on the lines after it, and the path is inside that
+    # body rather than a redirect target.
+    line = before.rsplit("\n", 1)[-1]
+    if "<<" in line:
         return False
-    return _looks_like_a_write(text)
+    after = text[end:end + 34].lower()
+    # A write mode after the path only counts when it is on the same
+    # statement — the same rule as for the window before.
+    if "\n" in after:
+        after = after.split("\n", 1)[0]
+    for marker in _WRITE_BEFORE:
+        if marker in line:
+            return True
+    for marker in _WRITE_AFTER:
+        if marker in after:
+            return True
+    for op in _MOVING_OPS:
+        if op in line:
+            return True
+    return False
 
 
 # The path fragments that name the state tree.
@@ -819,30 +909,6 @@ _WRITE_MARKERS = (
     "writerow", "writelines", "write_text", "write_bytes",
     "os.remove", "os.rename", "os.replace", "os.mkdir", "os.makedirs",
 )
-
-
-def _looks_like_a_write(text: str) -> bool:
-    lowered = text.lower()
-    for marker in _WRITE_MARKERS:
-        if marker in lowered:
-            return True
-    # A single '>' is a redirect only when it is not part of '->' or '=>'.
-    for idx, ch in enumerate(lowered):
-        if ch != ">":
-            continue
-        if lowered[idx + 1: idx + 2] == ">":
-            continue
-        prev = lowered[idx - 1] if idx else ""
-        nxt = lowered[idx + 1: idx + 2]
-        if prev in ("-", "=") or nxt == "=":
-            continue
-        return True
-    # Python write modes.
-    for mode in ("'w'", '"w"', "'a'", '"a"', "'w+'", '"w+"', "'a+'", '"a+"',
-                 "'x'", '"x"', "'wb'", '"wb"', "'ab'", '"ab"'):
-        if mode in lowered:
-            return True
-    return False
 
 
 def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:

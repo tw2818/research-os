@@ -869,6 +869,31 @@ def test_a_pipe_into_the_state_tree_is_blocked():
     assert out is not None, out
 
 
+def test_a_heredoc_to_tmp_that_mentions_the_state_tree_is_allowed():
+    """The check is on the write target. A command that reads the ledger and
+    writes a summary elsewhere mentions the state tree and is not touching
+    it — this is the false positive that a mention-based check produces."""
+    m = _handler()
+    cmd = (
+        "cat > /tmp/summary.sh <<'EOF'\n"
+        f"cat {state.HOME}/topics/X/claims.tsv\n"
+        "EOF\n"
+    )
+    out = m._state_write_guard(tool_name="terminal", args={"command": cmd})
+    assert out is None, out
+
+
+def test_a_heredoc_writing_into_the_state_tree_is_blocked():
+    m = _handler()
+    cmd = (
+        "cat > " + str(state.HOME / "topics" / "X" / "claims.tsv") + " <<'EOF'\n"
+        "L1\tx\n"
+        "EOF\n"
+    )
+    out = m._state_write_guard(tool_name="terminal", args={"command": cmd})
+    assert out is not None, out
+
+
 def test_transform_llm_output_flags_unaccounted_assertions():
     m = _handler()
     sid = "t-transform"

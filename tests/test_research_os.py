@@ -754,6 +754,121 @@ def test_map_gap_is_quiet_once_filled():
     assert "研究地图的缺口" not in out["context"], out["context"][-300:]
 
 
+# --------------------------------------------------------------------------
+# the state tree is behind the tool
+# --------------------------------------------------------------------------
+
+
+def test_writing_the_state_tree_directly_is_blocked():
+    """The tool checks the kind, requires a source, enforces the strength
+    rule and refuses duplicates. A ledger that can be corrupted by a text
+    file is not a ledger."""
+    m = _handler()
+    path = str(state.HOME / "topics" / "X" / "claims.tsv")
+    out = m._state_write_guard(tool_name="write_file", args={"path": path})
+    assert out is not None
+    assert out["action"] == "block"
+    assert "research_mode" in out["message"]
+
+
+def test_writing_outside_the_state_tree_is_allowed():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="write_file", args={"path": "/home/twebery/notes.md"}
+    )
+    assert out is None, out
+
+
+def test_reading_the_state_tree_is_allowed():
+    m = _handler()
+    path = str(state.HOME / "topics" / "X" / "claims.tsv")
+    out = m._state_write_guard(tool_name="read_file", args={"path": path})
+    assert out is None, out
+
+
+def test_a_terminal_command_touching_the_state_tree_is_blocked():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": f"echo 'x' >> {state.HOME}/topics/X/claims.tsv"},
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_an_ordinary_terminal_command_is_allowed():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal", args={"command": "ls -la /home/twebery"}
+    )
+    assert out is None, out
+
+
+def test_execute_code_writing_the_state_tree_is_blocked():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="execute_code",
+        args={"code": f"open('{state.HOME}/topics/X/claims.tsv', 'w')"},
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_a_relative_path_into_the_state_tree_is_blocked():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": "cat >> research-os/topics/X/claims.tsv"},
+    )
+    assert out is not None, out
+
+
+def test_reading_the_state_tree_from_a_command_is_allowed():
+    """Reading the state is how the agent finds out what is already there."""
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": f"cat {state.HOME}/topics/X/claims.tsv"},
+    )
+    assert out is None, out
+
+
+def test_listing_the_state_tree_from_a_command_is_allowed():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": f"ls -la {state.HOME}/topics/X"},
+    )
+    assert out is None, out
+
+
+def test_opening_a_state_file_for_reading_is_allowed():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="execute_code",
+        args={"code": f"open('{state.HOME}/topics/X/claims.tsv').read()"},
+    )
+    assert out is None, out
+
+
+def test_a_redirect_into_the_state_tree_is_blocked():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": f"echo x > {state.HOME}/topics/X/claims.tsv"},
+    )
+    assert out is not None, out
+
+
+def test_a_pipe_into_the_state_tree_is_blocked():
+    m = _handler()
+    out = m._state_write_guard(
+        tool_name="terminal",
+        args={"command": f"echo x | tee {state.HOME}/topics/X/claims.tsv"},
+    )
+    assert out is not None, out
+
+
 def test_transform_llm_output_flags_unaccounted_assertions():
     m = _handler()
     sid = "t-transform"

@@ -400,12 +400,28 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     f" Switched from {previous} to {project}. Do not carry hypotheses "
                     f"or claims over from {previous}."
                 )
+            # Tell the agent what this topic is still missing, and which
+            # actions record it. The tool response is where the agent looks;
+            # the injected protocol is capped and cannot carry this.
+            missing = _map_gaps(project)
+            available = (
+                "可用动作：claim（记证据）、contradict（记竞争解释和区分它们的证据）、"
+                "question（记未解决的问题）、map（更新研究地图）、validate（检查账本）。"
+            )
             return ok({
                 "mode": "research",
                 "topic": project,
                 "core_question": m.get("core_question", ""),
                 "hypotheses": m.get("hypotheses", []),
-                "note": hint.strip(),
+                "open_questions": m.get("open_questions", []),
+                "contradictions": len(
+                    (_state.read_contradictions(project) or {}).get("items") or []
+                ),
+                "claims": len(_state.read_claims(project)),
+                "available_actions": available,
+                "missing": missing,
+                "note": (hint.strip() + ("\n" if hint.strip() and missing else "")
+                         + ("\n".join(missing) if missing else "")).strip(),
             })
 
         if action == "off":
@@ -591,7 +607,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             # actually a gap to point at.
             missing = _map_gaps(topic)
             if missing:
-                ctx = f"{ctx}\n\n{missing}"
+                ctx = (
+                    f"{ctx}\n\n[Research OS · 研究地图的缺口]\n"
+                    + "\n".join(missing)
+                )
         elif detected == "research":
             # A research question arrived while idle. The model will reach for
             # PubMed / web_search if nothing says otherwise, so the nudge has
@@ -625,8 +644,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         return None
 
 
-def _map_gaps(topic: str) -> str:
-    """Name what the research map is missing, if anything.
+def _map_gaps(topic: str) -> list[str]:
+    """What the research map is missing, if anything.
 
     A topic with competing explanations but no recorded contradiction has not
     said what would tell them apart — which is the question the whole design
@@ -645,7 +664,7 @@ def _map_gaps(topic: str) -> str:
         wants = []
         if len(hyp) >= 2 and not items:
             wants.append(
-                f"这个课题有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们——"
+                f"有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们——"
                 f"用 research_mode(action='contradict', project='{topic}', "
                 f"title='<哪个解释>', separator='<什么证据能区分>') 补上。"
             )
@@ -655,11 +674,9 @@ def _map_gaps(topic: str) -> str:
                 f"用 research_mode(action='question', project='{topic}', "
                 f"question='<还没解决的问题>') 记一条。"
             )
-        if not wants:
-            return ""
-        return "[Research OS · 研究地图的缺口]\n" + "\n".join(wants)
+        return wants
     except Exception:
-        return ""
+        return []
 
 
 def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
@@ -695,6 +712,137 @@ SEARCH_TOOLS = (
     "web_search",
     "web_extract",
 )
+
+
+def _state_write_guard(**kwargs: Any) -> dict[str, Any] | None:
+    """Keep the state tree behind the tool.
+
+    The ledger only works if every claim goes through the tool: the tool
+    checks the kind, requires a source for observations, enforces that an
+    inference does not exceed its weakest premise, and refuses a duplicate.
+    An agent that writes claims.tsv directly bypasses all of it, and a
+    ledger that can be corrupted by a text file is not a ledger.
+
+    Reading the state tree is fine — that is how the agent finds out what is
+    already there. Writing it is not.
+    """
+    try:
+        tool_name = str(kwargs.get("tool_name") or "")
+        args = kwargs.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+
+        if tool_name in ("write_file", "patch"):
+            target = str(args.get("path") or args.get("file_path") or "")
+            if not _is_state_path(target):
+                return None
+        elif tool_name in ("terminal", "execute_code"):
+            if not _mentions_state_tree(_command_text(args)):
+                return None
+        else:
+            return None
+
+        return {
+            "action": "block",
+            "message": (
+                "[Research OS · 别直接改状态树]\n"
+                "账本和研究地图由 research_mode 工具维护。直接写文件会绕过"
+                "类型检查、来源要求、推论强度校验和去重——那样账本就不再可信。\n"
+                "要记一条断言：research_mode(action='claim', project='<课题>', "
+                "claim={'kind':'observation','content':'...','source':'PMID ...'})\n"
+                "要记竞争解释：research_mode(action='contradict', project='<课题>', "
+                "title='<哪个解释>', separator='<什么证据能区分>')"
+            ),
+        }
+    except Exception:
+        return None
+
+
+def _command_text(args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    return " ".join(str(args.get(k) or "") for k in ("command", "code", "script"))
+
+
+def _is_state_path(path: str) -> bool:
+    try:
+        target = Path(str(path)).expanduser()
+        try:
+            target = target.resolve()
+        except OSError:
+            pass
+        home = _state.HOME.resolve()
+    except Exception:
+        return False
+    try:
+        target.relative_to(home)
+        return True
+    except ValueError:
+        return False
+
+
+def _mentions_state_tree(text: str) -> bool:
+    """True when a command both names the state tree and writes to it.
+
+    Reading the state is how the agent finds out what is already recorded, so
+    a read must not be blocked. Only a write is.
+    """
+    if not text:
+        return False
+    try:
+        home = str(_state.HOME.resolve())
+    except Exception:
+        return False
+    lowered = text.lower()
+    mentions = home.lower() in lowered or any(
+        marker in lowered
+        for marker in _STATE_TREE_MARKERS
+    )
+    if not mentions:
+        return False
+    return _looks_like_a_write(text)
+
+
+# The path fragments that name the state tree.
+_STATE_TREE_MARKERS = (
+    "research-os" + "/topics",
+    "research-os" + "/sessions",
+    "research-os" + "/config.json",
+    "research-os" + "/projects.json",
+)
+
+# Shell redirections and Python's write modes. Read verbs are deliberately
+# absent: `cat`, `ls`, `head`, `grep` and opening a file for reading are how
+# the agent looks at what is already there.
+_WRITE_MARKERS = (
+    ">>", "tee ", "dd ", "truncate", "sed -i", "shred ",
+    "writerow", "writelines", "write_text", "write_bytes",
+    "os.remove", "os.rename", "os.replace", "os.mkdir", "os.makedirs",
+)
+
+
+def _looks_like_a_write(text: str) -> bool:
+    lowered = text.lower()
+    for marker in _WRITE_MARKERS:
+        if marker in lowered:
+            return True
+    # A single '>' is a redirect only when it is not part of '->' or '=>'.
+    for idx, ch in enumerate(lowered):
+        if ch != ">":
+            continue
+        if lowered[idx + 1: idx + 2] == ">":
+            continue
+        prev = lowered[idx - 1] if idx else ""
+        nxt = lowered[idx + 1: idx + 2]
+        if prev in ("-", "=") or nxt == "=":
+            continue
+        return True
+    # Python write modes.
+    for mode in ("'w'", '"w"', "'a'", '"a"', "'w+'", '"w+"', "'a+'", '"a+"',
+                 "'x'", '"x"', "'wb'", '"wb"', "'ab'", '"ab"'):
+        if mode in lowered:
+            return True
+    return False
 
 
 def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
@@ -934,5 +1082,6 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+    ctx.register_hook("pre_tool_call", _state_write_guard)
     ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("transform_llm_output", _transform_llm_output)

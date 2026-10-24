@@ -58,14 +58,20 @@ export RESEARCH_OS_HOME="$STATE_HOME"
 echo "==> Initialising state at $STATE_HOME"
 python3 "$SRC/scripts/osctl.py" init ${VAULT:+--vault "$VAULT"} >/dev/null
 
+# Keep the CLI and the renderer next to the state, so they stay available
+# after the temporary clone is gone.
+mkdir -p "$STATE_HOME/bin"
+cp "$SRC/scripts/osctl.py" "$STATE_HOME/bin/osctl.py"
+cp "$SRC/scripts/render_obsidian.py" "$STATE_HOME/bin/render_obsidian.py"
+
 # ---------------------------------------------------------------- enable
 if command -v hermes >/dev/null 2>&1; then
   if [ "$ENABLE" = "1" ]; then
     echo "==> Enabling plugin"
-    hermes plugins enable research-os || true
+    HERMES_HOME="$HERMES_HOME" hermes plugins enable research-os || true
   else
-    echo "==> Enabling plugin"
-    hermes plugins enable research-os || true
+    echo "==> Plugin copied but not enabled. Run:"
+    echo "    HERMES_HOME=$HERMES_HOME hermes plugins enable research-os"
   fi
   echo "==> Restart the gateway to load the tool:  hermes gateway restart"
 else
@@ -76,4 +82,5 @@ echo
 echo "Done. Next:"
 echo "  1. restart the gateway:   hermes gateway restart"
 echo "  2. ask a research question — the agent opens research mode itself"
-echo "  3. list topics:           python3 $SRC/scripts/osctl.py topics"
+echo "  3. list topics:           RESEARCH_OS_HOME='$STATE_HOME' python3 '$STATE_HOME/bin/osctl.py' topics"
+echo "  4. render the Obsidian notes:  RESEARCH_OS_HOME='$STATE_HOME' python3 '$STATE_HOME/bin/render_obsidian.py' --all"

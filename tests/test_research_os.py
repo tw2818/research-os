@@ -309,6 +309,7 @@ def test_research_question_after_exit_gets_the_nudge_again():
     )
     m._tool_handler({"action": "on", "project": "Reenter"}, session_id=sid)
     m._pre_llm_call(session_id=sid, user_message="退出科研模式", turn_id="t1")
+    assert state.read_session(sid)["mode"] == "idle"
     out = m._pre_llm_call(
         session_id=sid, user_message="证据能区分这两种解释吗？", turn_id="t2"
     )
@@ -349,8 +350,7 @@ def test_scan_turn_notices_ledger_use():
 
 def test_accounting_note_fires_when_evidence_unaccounted():
     m = _handler()
-    history = [_tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001")]
-    note = m._accounting_note("T-acc", history)
+    note = m._accounting_note("T-acc", {"evidence": 2, "ledger": 0})
     assert "账本" in note
     assert "research_mode" in note
     assert "claim" in note
@@ -358,17 +358,181 @@ def test_accounting_note_fires_when_evidence_unaccounted():
 
 def test_accounting_note_silent_when_ledger_used():
     m = _handler()
-    history = [
-        _tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001"),
-        _tool_msg("research_mode", "recorded L1"),
-    ]
-    assert m._accounting_note("T-acc", history) == ""
+    assert m._accounting_note("T-acc", {"evidence": 2, "ledger": 1}) == ""
 
 
 def test_accounting_note_silent_without_evidence():
     m = _handler()
-    assert m._accounting_note("T-acc", [_tool_msg("read_file", "x")]) == ""
-    assert m._accounting_note("T-acc", []) == ""
+    assert m._accounting_note("T-acc", {"evidence": 0, "ledger": 0}) == ""
+
+
+def test_post_tool_call_records_evidence_and_ledger():
+    m = _handler()
+    sid = "t-activity"
+    m._post_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    m._post_tool_call(
+        tool_name="research_mode",
+        args={"action": "claim", "claim": {"content": "L1"}},
+        session_id=sid,
+        turn_id="t1",
+    )
+    act = state.turn_activity(sid, "t1")
+    assert act["evidence"] == 1
+    assert act["ledger"] == 1
+
+
+def test_opening_a_topic_is_not_recording():
+    """`create` and `on` are not claim writes. Counting them would make a turn
+    that never recorded anything look accounted for."""
+    m = _handler()
+    sid = "t-activity-op"
+    for action in ("create", "on", "list", "status"):
+        m._post_tool_call(
+            tool_name="research_mode", args={"action": action}, session_id=sid, turn_id="t1"
+        )
+    act = state.turn_activity(sid, "t1")
+    assert act["ledger"] == 0, act
+
+
+def test_claim_without_content_is_not_recording():
+    m = _handler()
+    sid = "t-activity-empty"
+    m._post_tool_call(
+        tool_name="research_mode",
+        args={"action": "claim", "claim": {}},
+        session_id=sid,
+        turn_id="t1",
+    )
+    assert state.turn_activity(sid, "t1")["ledger"] == 0
+
+
+def test_gap_is_reported_when_only_the_topic_was_opened():
+    """The real failure: the agent opened a topic and searched, and never
+    wrote a claim."""
+    m = _handler()
+    sid = "t-gap2"
+    m._tool_handler(
+        {"action": "create", "project": "GapTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "GapTopic2"}, session_id=sid)
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    m._post_tool_call(
+        tool_name="research_mode", args={"action": "on"}, session_id=sid, turn_id="t1"
+    )
+    m._post_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
+    assert out is not None
+    assert "账本还是空的" in out["context"], out["context"][-300:]
+
+
+def test_turn_activity_is_isolated_per_turn():
+    m = _handler()
+    sid = "t-activity2"
+    m._post_tool_call(tool_name="web_search", session_id=sid, turn_id="t1")
+    assert state.turn_activity(sid, "t1")["evidence"] == 1
+    m._post_tool_call(tool_name="read_file", session_id=sid, turn_id="t2")
+    assert state.turn_activity(sid, "t2")["evidence"] == 0
+    assert state.turn_activity(sid, "t2")["tools"] == ["read_file"]
+    # The earlier turn is still readable — that is what the gap report uses.
+    assert state.turn_activity(sid, "t1")["evidence"] == 1
+
+
+def test_next_turn_reports_the_previous_gap():
+    """The gap is detected on the turn after the one that left it."""
+    m = _handler()
+    sid = "t-gap"
+    m._tool_handler(
+        {"action": "create", "project": "GapTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "GapTopic"}, session_id=sid)
+    # Turn 1: the agent searches and records nothing.
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    m._post_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    # Turn 2: the agent should be told the ledger is still empty.
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
+    assert out is not None
+    assert "账本还是空的" in out["context"], out["context"][-400:]
+
+
+def test_transform_llm_output_flags_unaccounted_assertions():
+    m = _handler()
+    sid = "t-transform"
+    m._tool_handler(
+        {"action": "create", "project": "TrTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "TrTopic"}, session_id=sid)
+    state.append_claim("TrTopic", {
+        "kind": "observation",
+        "content": "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降",
+        "source": "PMID 10000001",
+    })
+    out = m._transform_llm_output(
+        session_id=sid,
+        response_text=(
+            "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。"
+            "另外 Smith 2019 的队列研究表明工作记忆容量在抑郁中显著下降。"
+        ),
+    )
+    assert out is not None
+    assert "Smith 2019" in out
+    assert "Wang 2016" not in out.split("没有记进账本")[-1], out
+
+
+def test_transform_llm_output_quiet_when_everything_is_accounted():
+    m = _handler()
+    sid = "t-transform2"
+    m._tool_handler(
+        {"action": "create", "project": "TrTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "TrTopic2"}, session_id=sid)
+    state.append_claim("TrTopic2", {
+        "kind": "observation",
+        "content": "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降",
+        "source": "PMID 10000001",
+    })
+    out = m._transform_llm_output(
+        session_id=sid,
+        response_text="Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。",
+    )
+    assert out is None, out
+
+
+def test_transform_llm_output_flags_everything_when_the_ledger_is_empty():
+    """An empty ledger means every assertion is unaccounted for — that is the
+    case worth flagging, not the case worth ignoring."""
+    m = _handler()
+    sid = "t-empty-ledger"
+    m._tool_handler(
+        {"action": "create", "project": "EmptyTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "EmptyTopic"}, session_id=sid)
+    out = m._transform_llm_output(
+        session_id=sid,
+        response_text="Wang 2016 的 meta 分析表明睡眠剥夺后陈述性记忆评分下降。",
+    )
+    assert out is not None
+    assert "账本还是空的" in out, out[-300:]
+    assert "Wang 2016" in out
+
+
+def test_transform_llm_output_quiet_outside_research_mode():
+    m = _handler()
+    out = m._transform_llm_output(
+        session_id="t-transform3",
+        response_text="Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。",
+    )
+    assert out is None, out
 
 
 def test_assertive_sentences_ignores_hedged():
@@ -397,16 +561,13 @@ def test_audit_injection_reaches_the_turn():
         session_id=sid,
     )
     m._tool_handler({"action": "on", "project": "AuditTopic"}, session_id=sid)
-    out = m._pre_llm_call(
-        session_id=sid,
-        user_message="继续这个课题",
-        turn_id="turn-1",
-        conversation_history=[
-            _tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001")
-        ],
+    m._pre_llm_call(session_id=sid, user_message="开始", turn_id="turn-1")
+    m._post_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="turn-1"
     )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="turn-2")
     assert out is not None
-    assert "账本还是空的" in out["context"], out["context"][:300]
+    assert "账本还是空的" in out["context"], out["context"][-300:]
 
 
 # --------------------------------------------------------------------------
@@ -620,13 +781,16 @@ def test_idle_block_mentions_the_tool():
 
 
 def _handler():
-    import importlib.util
-    path = Path(__file__).resolve().parent.parent / "research_os" / "__init__.py"
-    spec = importlib.util.spec_from_file_location("ro_mod", path)
-    assert spec is not None and spec.loader is not None
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+    """The plugin module under test.
+
+    The package is imported normally rather than loaded from its file path:
+    loading the file a second time would run the module loader again and
+    produce a second copy of the implementation modules, so the plugin would
+    write state the tests cannot see.
+    """
+    import research_os
+
+    return research_os
 
 
 def test_tool_returns_string():

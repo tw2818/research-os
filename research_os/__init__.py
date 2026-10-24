@@ -60,7 +60,15 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
     # it must exist in sys.modules before they are executed.
     for short in ("state", "audit", "classify", "protocol", "validate"):
         full = f"{ns}.{short}"
-        spec = importlib.util.spec_from_file_location(full, _HERE / f"{short}.py")
+        path = _HERE / f"{short}.py"
+        # Drop any cached bytecode for this file first. A .pyc is validated
+        # against the source's mtime and size, and an edit that lands inside
+        # the same second and leaves the size unchanged passes that check —
+        # the old bytecode then runs against the new source, silently, and the
+        # symptom is a function that "does not exist" on a file that plainly
+        # defines it.
+        _drop_bytecode(path)
+        spec = importlib.util.spec_from_file_location(full, path)
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot load {short}.py from {_HERE}")
         module = importlib.util.module_from_spec(spec)
@@ -76,6 +84,21 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
     )
 
 
+def _drop_bytecode(path: Path) -> None:
+    """Remove the .pyc files a source file could have produced."""
+    import importlib.util
+
+    try:
+        cache = Path(importlib.util.cache_from_source(str(path)))
+    except Exception:
+        return
+    for candidate in (cache, cache.with_suffix(".opt-1.pyc"), cache.with_suffix(".opt-2.pyc")):
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
 try:
     _audit, _classify, _protocol, _state, _validate = _load_impl_modules()
 except Exception:  # pragma: no cover - package layout (repo / tests)
@@ -84,6 +107,16 @@ except Exception:  # pragma: no cover - package layout (repo / tests)
     from . import protocol as _protocol  # type: ignore[no-redef]
     from . import state as _state  # type: ignore[no-redef]
     from . import validate as _validate  # type: ignore[no-redef]
+
+# The implementation modules under their public names, so the repo's own
+# tests and scripts address the same modules the plugin runs. Without this,
+# `research_os.state` and the plugin's `research_os_impl.state` are two
+# different modules with two different sets of state.
+audit = _audit
+classify = _classify
+protocol = _protocol
+state = _state
+validate = _validate
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +432,12 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         # here, scoped to this turn, and read back by the search guard.
         turn_id = str(kwargs.get("turn_id") or "")
         synthetic = _classify.is_synthetic(message)
+
+        # Read the previous turn's activity before the turn id moves on: the
+        # tool activity of the turn that just ended is what says whether it
+        # left evidence unaccounted for.
+        previous_activity = _state.previous_turn_activity(session_id, turn_id)
+
         _state.mark_turn(session_id, turn_id=turn_id, synthetic=synthetic)
         if synthetic:
             return None
@@ -423,8 +462,14 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             _state.set_session_mode(session_id, "chore", topic)
             mode, topic = "chore", topic
 
+        ctx: str | None = None
         if mode == "research" and topic and _state.topic_exists(topic):
             ctx = _protocol.build_research_block(topic, cfg)
+            # The last turn gathered evidence and recorded nothing. Say so
+            # before the agent builds the next answer on top of it.
+            gap = _accounting_note(topic, previous_activity)
+            if gap:
+                ctx = f"{ctx}\n\n{gap}"
         elif detected == "research":
             # A research question arrived while idle. The model will reach for
             # PubMed / web_search if nothing says otherwise, so the nudge has
@@ -450,34 +495,25 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
                     "说不出核心问题就别开始检索。建好后调 action='on' 进入，"
                     "再按四类断言（observation/report/inference/hypothesis）回答并记账。"
                 )
-        else:
+
+        if not ctx:
             return None
-
-        # The turn is in research mode. Has it gathered evidence it has not
-        # accounted for? This is checked here, before the agent writes its
-        # answer, because afterwards the evidence lives only in the chat.
-        note = _accounting_note(topic, kwargs.get("conversation_history") or [])
-        if note:
-            ctx = f"{ctx}\n\n{note}"
-
         return {"context": ctx}
     except Exception:
         return None
 
 
-def _accounting_note(topic: str, history: list[Any]) -> str:
-    """Ask for the ledger to be filled when the turn used evidence without
+def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
+    """Ask for the ledger to be filled when a turn used evidence without
     recording it. Empty string when there is nothing to say."""
-    scan = _audit.scan_turn(history)
-    if scan["evidence_calls"] == 0:
+    evidence = int(activity.get("evidence") or 0)
+    ledger = int(activity.get("ledger") or 0)
+    if evidence == 0 or ledger > 0:
         return ""
-    if scan["ledger_calls"] > 0:
-        return ""
-    n = scan["evidence_calls"]
-    what = f"{n} 次检索" if n > 1 else "一次检索"
+    what = f"{evidence} 次检索" if evidence > 1 else "一次检索"
     return (
-        f"[Research OS · 账本还是空的]\n"
-        f"这轮做了{what}，但账本里一条断言都没有——这些证据现在只存在于聊天记录里，"
+        f"[Research OS · 上一轮的账本还是空的]\n"
+        f"上一轮做了{what}，但账本里一条断言都没有——那些证据现在只存在于聊天记录里，"
         f"下一个会话就找不回来了。\n"
         f"动笔前先用 research_mode(action='claim', project='{topic}', claim={{...}}) "
         f"把用到的证据记进去：观察和转述要填 source（PMID/DOI），"
@@ -550,6 +586,110 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         return None
 
 
+def _post_tool_call(**kwargs: Any) -> None:
+    """Track what the turn did with evidence.
+
+    pre_llm_call fires once, at the start of a turn, so it cannot see the
+    tool results the current turn produced. This hook sees every tool call as
+    it happens, and records enough to answer the only question that matters
+    at the next turn: did the turn gather evidence and record nothing?
+    """
+    try:
+        tool_name = str(kwargs.get("tool_name") or "")
+        session_id = str(kwargs.get("session_id") or "unknown")
+        turn_id = str(kwargs.get("turn_id") or "")
+        if not tool_name:
+            return None
+        # Only a claim write counts as recording. Creating a topic or opening
+        # one is not the same act, and counting them would make a turn that
+        # never wrote a claim look accounted for.
+        is_ledger = tool_name == "research_mode" and _is_claim_call(kwargs.get("args"))
+        _state.note_tool_activity(
+            session_id,
+            turn_id=turn_id,
+            tool_name=tool_name,
+            is_evidence=tool_name in _audit.EVIDENCE_TOOLS,
+            is_ledger=is_ledger,
+        )
+        return None
+    except Exception:
+        return None
+
+
+def _is_claim_call(args: Any) -> bool:
+    """True when a research_mode call actually wrote a claim."""
+    if not isinstance(args, dict):
+        return False
+    action = str(args.get("action") or "").lower()
+    if action != "claim":
+        return False
+    claim = args.get("claim")
+    return isinstance(claim, dict) and bool(claim.get("content"))
+
+
+def _transform_llm_output(**kwargs: Any) -> str | None:
+    """Check the outgoing answer against the ledger.
+
+    This is the only hook that sees the text the user is about to read, and
+    it fires before the answer is stored, so a correction here still reaches
+    the user. The failure it catches: the answer asserts something that was
+    never classified, so nothing ever checked whether it was an observation
+    or an inference.
+
+    The answer is not rewritten. A note is appended when the answer contains
+    an unaccounted assertion, because silently editing the agent's prose
+    would hide the very thing the ledger exists to surface.
+    """
+    try:
+        response = str(kwargs.get("response_text") or "")
+        if not response.strip():
+            return None
+        session_id = str(kwargs.get("session_id") or "unknown")
+
+        s = _state.read_session(session_id)
+        if s.get("mode") != "research":
+            return None
+        topic = s.get("topic") or ""
+        if not topic or not _state.topic_exists(topic):
+            return None
+
+        claims = _state.read_claims(topic)
+        known = "\n".join(str(c.get("content") or "") for c in claims)
+
+        if claims:
+            unaccounted = _audit.unaccounted_sentences(response, known)
+        else:
+            # An empty ledger means every assertion in the answer is
+            # unaccounted for. That is the case worth flagging, not the case
+            # worth ignoring.
+            unaccounted = _audit.assertive_sentences(response)
+        if not unaccounted:
+            return None
+
+        shown = unaccounted[:3]
+        lines = "\n".join(f"- {s_.strip()[:160]}" for s_ in shown)
+        more = f"（另有 {len(unaccounted) - len(shown)} 条）" if len(unaccounted) > len(shown) else ""
+        if claims:
+            reason = (
+                f"它们不在「{topic}」的账本里，所以没有经过四类断言的检查。"
+            )
+        else:
+            reason = (
+                f"「{topic}」的账本还是空的，所以这些断言都没有经过四类断言的检查。"
+            )
+        return (
+            f"{response}\n\n"
+            f"---\n"
+            f"*[Research OS] 下面 {len(unaccounted)} 条断言没有记进账本{more}：\n"
+            f"{lines}\n\n"
+            f"{reason}"
+            f"要么用 research_mode(action='claim') 补记并标好 kind，"
+            f"要么改写成明确标注的推论或假设。*"
+        )
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
@@ -566,3 +706,5 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+    ctx.register_hook("post_tool_call", _post_tool_call)
+    ctx.register_hook("transform_llm_output", _transform_llm_output)

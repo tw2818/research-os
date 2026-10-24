@@ -324,7 +324,10 @@ def session_path(session_id: str) -> Path:
 
 
 def read_session(session_id: str) -> dict[str, Any]:
-    return _read_json(session_path(session_id), {"mode": "idle", "topic": ""})
+    data = _read_json(session_path(session_id), {"mode": "idle", "topic": ""})
+    if not isinstance(data, dict):
+        return {"mode": "idle", "topic": ""}
+    return data
 
 
 def write_session(session_id: str, data: dict[str, Any]) -> None:
@@ -383,3 +386,99 @@ def turn_is_synthetic(session_id: str, turn_id: str) -> bool:
     if turn_id and recorded and recorded != turn_id:
         return False
     return bool(s.get("turn_synthetic"))
+
+
+# --------------------------------------------------------------------------
+# per-turn tool activity
+# --------------------------------------------------------------------------
+# pre_llm_call fires once, at the start of a turn, so the conversation history
+# it sees holds the *previous* turn's tool results. To know what happened
+# during the current turn — which evidence tools it used, whether it recorded
+# anything — the tool activity has to be accumulated as it happens.
+#
+# Activity is stored per turn id, not as a single running counter: "the turn
+# that just ended left evidence unaccounted for" and "this turn has recorded
+# nothing yet" are different questions, and mixing them makes a busy turn
+# look like a clean one.
+
+# How many turns of activity to keep. Only the previous turn is ever needed.
+_ACTIVITY_TURNS_KEPT = 3
+
+
+def _activity_key(turn_id: str) -> str:
+    return turn_id or "no-turn"
+
+
+def note_tool_activity(
+    session_id: str, turn_id: str, tool_name: str, is_evidence: bool, is_ledger: bool
+) -> None:
+    s = read_session(session_id)
+    turns = s.get("turn_activities")
+    if not isinstance(turns, dict):
+        turns = {}
+    key = _activity_key(turn_id)
+    activity = turns.get(key)
+    if not isinstance(activity, dict):
+        activity = {"evidence": 0, "ledger": 0, "tools": []}
+        turns[key] = activity
+    if is_evidence:
+        activity["evidence"] = int(activity.get("evidence") or 0) + 1
+    if is_ledger:
+        activity["ledger"] = int(activity.get("ledger") or 0) + 1
+    tools = activity.setdefault("tools", [])
+    if len(tools) < 40:
+        tools.append(tool_name)
+    # Keep only the most recent turns.
+    if len(turns) > _ACTIVITY_TURNS_KEPT:
+        for old in list(turns)[:-_ACTIVITY_TURNS_KEPT]:
+            turns.pop(old, None)
+    s["turn_activities"] = turns
+    s["updated_at"] = now()
+    write_session(session_id, s)
+
+
+def turn_activity(session_id: str, turn_id: str) -> dict[str, Any]:
+    """What one specific turn did."""
+    s = read_session(session_id)
+    turns = s.get("turn_activities")
+    if not isinstance(turns, dict):
+        return {"evidence": 0, "ledger": 0, "tools": []}
+    activity = turns.get(_activity_key(turn_id))
+    if not isinstance(activity, dict):
+        return {"evidence": 0, "ledger": 0, "tools": []}
+    return {
+        "evidence": int(activity.get("evidence") or 0),
+        "ledger": int(activity.get("ledger") or 0),
+        "tools": list(activity.get("tools") or []),
+    }
+
+
+def previous_turn_activity(session_id: str, current_turn_id: str = "") -> dict[str, Any]:
+    """What the turn before the current one did.
+
+    With no turn id, the most recently active turn is described. With one, the
+    most recently active turn that is not the current one is described — the
+    turn that just ended, which is the one a gap report is about.
+    """
+    s = read_session(session_id)
+    turns = s.get("turn_activities")
+    if not isinstance(turns, dict) or not turns:
+        return {"evidence": 0, "ledger": 0, "tools": []}
+    current = _activity_key(current_turn_id)
+    best_key = ""
+    best_value: Any = None
+    for key, value in turns.items():
+        if not isinstance(value, dict):
+            continue
+        if current_turn_id and key == current:
+            continue
+        if key > best_key:
+            best_key = key
+            best_value = value
+    if not isinstance(best_value, dict):
+        return {"evidence": 0, "ledger": 0, "tools": []}
+    return {
+        "evidence": int(best_value.get("evidence") or 0),
+        "ledger": int(best_value.get("ledger") or 0),
+        "tools": list(best_value.get("tools") or []),
+    }

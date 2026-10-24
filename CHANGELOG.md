@@ -66,3 +66,43 @@ First working version.
 - The injected block is capped (default 900 characters): every injected
   character breaks the prompt cache for the rest of the turn.
 - Everything fails open. A broken Research OS degrades to a normal agent.
+
+### Added (post-v0.1.0 verification)
+
+- **`pre_tool_call` search guard** — a literature search outside research mode
+  is blocked with a message saying what to do instead. This is the load-bearing
+  hook: a code-specialised model reaches for PubMed before it thinks about the
+  question, because retrieval is the shortest path to an answer. Verified
+  end-to-end — the agent was blocked twice (PubMed, then web_search), then
+  called `research_mode`, created a topic, and only then searched.
+- **Bundled-claim detection** — a claim that carries both an observation and
+  the conclusion drawn from it is flagged, with the split point identified and
+  the rewrite suggested. This is the failure the ledger exists to catch, and
+  the first end-to-end run produced it: "Remitted MDD retains objective
+  cognitive deficits, so depression-related cognitive impairment cannot be
+  reduced to concurrent emotional state", filed as a `report`.
+- **`repair` action** — rebuilds topic state that went missing while the
+  registry still lists the topic.
+- **State rebuild on `on`** — entering a topic whose state directory is gone
+  restores it from the registry instead of entering an empty topic.
+- **Argument-shape normalisation** — the handler accepts every shape Hermes'
+  argument coercion can deliver for a list-like field (declared list, bare dict
+  wrapped in a list, plain string), and the schema declares list-like fields as
+  delimited strings.
+- **Line-level truncation** — the injected block caps each line before dropping
+  lines, so a long core question cannot eat the whole budget.
+- **Claim-tool-call wording** — the injected block names the exact tool call and
+  gives the argument shape. Told only to "use the ledger", the agent classified
+  claims in prose instead of recording them; the first end-to-end run produced
+  no claim rows until this was fixed.
+
+### Verified end-to-end
+
+- The agent was blocked from searching, called `research_mode`, created a topic
+  with a falsifiable core question and three competing explanations (including
+  a third the design had not anticipated: "both, and separable"), then recorded
+  a `report` claim with three PMIDs and left its status `pending`.
+- The validator then flagged that claim as bundling an observation with a
+  conclusion.
+
+41 tests.

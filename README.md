@@ -13,22 +13,29 @@ Research OS changes *how the agent reasons*, not what it knows.
 
 ## How it works
 
-Two moving parts:
+Four moving parts:
 
 | | what it is | who drives it |
 |---|---|---|
 | `research_mode` | a **tool** the agent calls | the agent decides to enter research mode |
 | `pre_llm_call` | a **hook** that injects context | the system decides how the agent behaves |
+| `pre_tool_call` | a **hook** that holds a search | the system keeps the search attached to a question |
+| `post_tool_call` | a **hook** that records what happened | the system tracks evidence and records |
+| `transform_llm_output` | a **hook** that checks the outgoing answer | the system catches what was said but never recorded |
 
-The tool is the switch; the hook is the reflex.
+The tool is the switch; the hooks are the reflex.
 
-The agent has context the hook does not (what the user actually wants), so the
-agent decides *whether* this is research. The hook then changes *how* the
+The agent has context the hooks do not (what the user actually wants), so the
+agent decides *whether* this is research. The hooks then change *how* the
 agent answers for the rest of the session.
 
 **The user never sees any of this.** The protocol rides Hermes's
 `pre_llm_call` context channel, which is appended to the user message as
 agent-facing context. A chore request gets no injection at all.
+
+Leaving research mode works in plain language — "退出科研模式", "关掉研究模式",
+"结束课题" — because Hermes intercepts slash commands it does not know, so
+`/research off` never reaches the agent.
 
 ---
 
@@ -88,6 +95,15 @@ contains thinking that may have taken weeks.
 
 ## Install
 
+One shot:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tw2818/research-os/main/install.sh | bash \
+  --vault /path/to/your/obsidian/vault
+```
+
+Or by hand:
+
 ```bash
 hermes plugins install tw2818/research-os
 hermes plugins enable research-os
@@ -96,8 +112,14 @@ hermes plugins enable research-os
 Then point it at your Obsidian vault and initialise the state tree:
 
 ```bash
-python3 scripts/osctl.py init --vault /path/to/vault
+RESEARCH_OS_HOME=~/.hermes/research-os \
+  python3 ~/.hermes/research-os/bin/osctl.py init --vault /path/to/vault
 ```
+
+The installer leaves the plugin **copied but not enabled** unless you pass
+`--enable`, and it prints the exact command to enable it. That is deliberate:
+enabling a plugin changes how every conversation behaves, so it should be a
+decision, not a side effect of an install script.
 
 The vault side is for reading: the agent writes the state, a renderer turns it
 into prose you can browse. The machine-readable side stays in the state tree so
@@ -108,6 +130,38 @@ Update later with:
 ```bash
 hermes plugins update research-os
 ```
+
+### Installed layout
+
+```
+~/.hermes/
+  plugins/research-os/        the plugin: plugin.yaml + the modules
+  research-os/
+    config.json               vault path, thresholds
+    sessions/<id>.json        which topic a conversation is in
+    topics/<topic>/           the research state (see above)
+    bin/                      osctl.py and the renderer, with their modules
+```
+
+---
+
+## Configuration
+
+`~/.hermes/research-os/config.json`:
+
+| key | default | what it does |
+|---|---|---|
+| `obsidian_vault` | — | where the rendered notes go |
+| `obsidian_subdir` | `ResearchOS` | folder inside the vault |
+| `inject_protocol` | `true` | set `false` to turn the whole thing off |
+| `max_inject_chars` | `900` | how much protocol text rides along |
+| `searches_before_converge` | `20` | searches on one topic before the agent is asked to record or conclude; `0` turns the check off |
+
+The convergence check interrupts a search run that is not converging — it
+found one that searched fifty times, recorded nothing, and never answered.
+The check interrupts rather than forbids, and it interrupts at most twice per
+topic: a hook that keeps refusing the same tool is a stall, and a stall is
+worse than a long search.
 
 ---
 

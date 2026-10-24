@@ -18,9 +18,23 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Same three layouts as osctl.py: the repo, and the installed state tree
+# where the modules sit flat in the plugin directory.
+_HERE = Path(__file__).resolve().parent
+for _candidate in (_HERE.parent, _HERE.parent.parent):
+    if (_candidate / "research_os" / "__init__.py").is_file():
+        sys.path.insert(0, str(_candidate))
+        break
+else:
+    for _candidate in (_HERE.parent.parent, _HERE.parent):
+        if (_candidate / "state.py").is_file():
+            sys.path.insert(0, str(_candidate))
+            break
 
-from research_os import state  # noqa: E402
+try:
+    from research_os import state  # noqa: E402
+except ImportError:  # installed layout: the modules are flat
+    import state  # type: ignore[no-redef]  # noqa: E402
 
 KIND_LABEL = {
     "observation": "观察",

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # One-shot installer for the Research OS Hermes plugin.
 #
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/research-os/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tw2818/research-os/main/install.sh | bash
 #   bash install.sh --vault /path/to/obsidian/vault
 #
 # Safe to re-run: it copies files (never appends blindly), initialises the
 # state tree, and leaves the plugin disabled until you enable it.
 set -euo pipefail
 
-REPO="${RESEARCH_OS_REPO:-https://github.com/<owner>/research-os}"
+REPO="${RESEARCH_OS_REPO:-https://github.com/tw2818/research-os}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 VAULT=""
 ENABLE=0

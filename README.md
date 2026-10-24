@@ -89,7 +89,7 @@ contains thinking that may have taken weeks.
 ## Install
 
 ```bash
-hermes plugins install <owner>/research-os
+hermes plugins install tw2818/research-os
 hermes plugins enable research-os
 ```
 

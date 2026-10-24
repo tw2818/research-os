@@ -46,18 +46,20 @@ except ImportError:  # loaded as a package (repo layout: research_os/)
 TOOL_SCHEMA: dict[str, Any] = {
     "name": "research_mode",
     "description": (
-        "Control research mode for this conversation, and manage research topics. "
-        "ACTION 'on'/'switch' enter or switch topic (requires an existing topic name). "
+        "Research mode switch and topic manager. CALL THIS BEFORE answering a "
+        "research question or before running a literature search. "
+        "ACTION 'on'/'switch' enter or switch topic (needs an existing topic name). "
         "ACTION 'off' leaves research mode. ACTION 'list' lists topics. "
-        "ACTION 'create' makes a new topic (requires project + core_question). "
+        "ACTION 'create' makes a new topic (needs project + core_question — a topic "
+        "without a scientific question is not a research topic). "
         "ACTION 'delete' removes a topic (soft delete by default). "
-        "ACTION 'status' reports the current mode. "
+        "ACTION 'repair' rebuilds missing topic state. "
         "ACTION 'claim' records a claim in the topic ledger (kind: observation/report/"
         "inference/hypothesis) and ACTION 'validate' checks the ledger. "
-        "Call 'on' when the user asks a genuine research question (why / evidence / "
-        "compare / hypothesis / mechanism / literature), when reviewing literature, or "
-        "when a claim needs verification. Do NOT call for chores: file conversion, "
-        "imports, formatting, installs, unrelated debugging, or short factual lookups."
+        "Call 'on' when the user asks why something happens, whether evidence can "
+        "separate explanations, for a literature review, for a hypothesis, or when a "
+        "claim needs verification. Do NOT call for chores: file conversion, imports, "
+        "formatting, installs, unrelated debugging, or short factual lookups."
     ),
     "parameters": {
         "type": "object",
@@ -355,19 +357,92 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         if mode == "research" and topic and _state.topic_exists(topic):
             ctx = _protocol.build_research_block(topic, cfg)
         elif detected == "research":
-            # Nudge only. The agent must call the tool itself.
-            topics = [t["name"] for t in _state.list_topics()]
-            hint = ", ".join(topics) if topics else "(none yet — create one with action='create')"
-            ctx = (
-                "[Research OS · idle]\n"
-                "这轮看起来是研究问题，但当前不在科研模式。"
-                f"先调 research_mode(action='on', project='<topic>') 进入课题，再按四类断言回答。"
-                f"可用课题：{hint}"
-            )
+            # A research question arrived while idle. The model will reach for
+            # PubMed / web_search if nothing says otherwise, so the nudge has
+            # to be explicit about the order of operations: open the topic
+            # first, then retrieve. It still does not switch the mode itself —
+            # the agent calls the tool, so the decision stays with the agent.
+            topics = _state.list_topics()
+            if topics:
+                names = ", ".join(t["name"] for t in topics)
+                ctx = (
+                    "[Research OS · 需要先进入课题]\n"
+                    "这轮是研究问题。检索前先调 research_mode(action='on', project='<课题>') "
+                    "打开对应课题——这样才能带上该课题的核心问题、竞争解释和证据账本，"
+                    "回答时按四类断言（observation/report/inference/hypothesis）标注，"
+                    "并把证据记进账本。\n"
+                    f"可用课题：{names}"
+                )
+            else:
+                ctx = (
+                    "[Research OS · 需要先建立课题]\n"
+                    "这轮是研究问题。先调 research_mode(action='create', project='<名字>', "
+                    "core_question='<这个课题要解决什么科学问题>') 建立课题——"
+                    "说不出核心问题就别开始检索。建好后调 action='on' 进入，"
+                    "再按四类断言（observation/report/inference/hypothesis）回答并记账。"
+                )
         else:
             return None
 
         return {"context": ctx}
+    except Exception:
+        return None
+
+
+# Tools that constitute a literature search. Reaching for one of these while
+# not in research mode is the moment the model is about to gather evidence
+# without a question, a hypothesis set, or a ledger to put it in.
+SEARCH_TOOLS = (
+    "mcp__pubmed__pubmed_search_articles",
+    "mcp__pubmed__pubmed_fetch_articles",
+    "mcp__pubmed__pubmed_europepmc_search",
+    "mcp__pubmed__pubmed_fetch_fulltext",
+    "mcp__pubmed_search_mcp__unified_search",
+    "mcp__pubmed_search_mcp__get_fulltext",
+    "mcp__openalex__openalex_search_entities",
+    "mcp__openalex__openalex_get_citation_graph",
+    "web_search",
+    "web_extract",
+)
+
+
+def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
+    """Hold a literature search until the agent has a topic to put it in.
+
+    This is the load-bearing hook. A code-specialised model reaches for
+    PubMed before it thinks about the question, because retrieval is the
+    shortest path to an answer. Blocking here — once, with a message that
+    says what to do instead — is what turns "go search" into "open the topic
+    first, then search".
+    """
+    try:
+        tool_name = str(kwargs.get("tool_name") or "")
+        if tool_name not in SEARCH_TOOLS:
+            return None
+
+        session_id = str(kwargs.get("session_id") or "unknown")
+        s = _state.read_session(session_id)
+        if s.get("mode") == "research" and s.get("topic"):
+            return None
+
+        topics = _state.list_topics()
+        if topics:
+            names = ", ".join(t["name"] for t in topics)
+            msg = (
+                "先别检索。这轮看起来是研究问题，但还没进入课题——"
+                "没有核心问题就直接搜文献，得到的只是一堆没有上下文的条目。\n"
+                "先调 research_mode(action='on', project='<课题>') 打开对应课题，"
+                "再重新检索。\n"
+                f"可用课题：{names}"
+            )
+        else:
+            msg = (
+                "先别检索。还没有任何课题。\n"
+                "先调 research_mode(action='create', project='<名字>', "
+                "core_question='<这个课题要解决什么科学问题>') 建立课题——"
+                "说不出核心问题就别开始搜。建好后调 action='on' 进入，再检索。"
+            )
+        return {"action": "block", "message": msg}
     except Exception:
         return None
 
@@ -387,3 +462,4 @@ def register(ctx: Any) -> None:
         emoji="🔬",
     )
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("pre_tool_call", _pre_tool_call)

@@ -331,6 +331,64 @@ def test_tool_repair_fixes_orphans():
 
 
 # --------------------------------------------------------------------------
+# pre_tool_call: the search guard
+# --------------------------------------------------------------------------
+
+
+def test_search_is_blocked_when_idle():
+    m = _handler()
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        args={},
+        session_id="t-guard",
+    )
+    assert out is not None
+    assert out.get("action") == "block"
+    assert "research_mode" in out.get("message", "")
+
+
+def test_search_is_blocked_in_chore_mode():
+    m = _handler()
+    out = m._pre_tool_call(
+        tool_name="web_search", args={}, session_id="t-guard2"
+    )
+    assert out is not None and out.get("action") == "block"
+
+
+def test_search_allowed_in_research_mode():
+    m = _handler()
+    import json
+    m._tool_handler(
+        {"action": "create", "project": "GuardTopic", "core_question": "Q?"},
+        session_id="t-guard3",
+    )
+    m._tool_handler({"action": "on", "project": "GuardTopic"}, session_id="t-guard3")
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        args={},
+        session_id="t-guard3",
+    )
+    assert out is None, out
+
+
+def test_non_search_tool_never_blocked():
+    m = _handler()
+    for tool in ("read_file", "write_file", "terminal", "execute_code"):
+        assert m._pre_tool_call(tool_name=tool, args={}, session_id="t-guard4") is None
+
+
+def test_search_guard_mentions_creating_when_no_topics():
+    m = _handler()
+    import json
+    # A fresh state dir with no topics at all.
+    out = m._pre_tool_call(
+        tool_name="web_search", args={}, session_id="t-guard5"
+    )
+    msg = (out or {}).get("message", "")
+    assert "create" in msg or "课题" in msg
+
+
+# --------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------
 

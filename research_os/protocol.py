@@ -17,9 +17,15 @@ import re
 from typing import Any
 
 try:
-    from .state import read_claims, read_map
-except ImportError:  # loaded flat inside the Hermes plugin directory
-    from state import read_claims, read_map  # type: ignore[no-redef]
+    # Private namespace first: the plugin loads its modules under
+    # `research_os_impl.*` so they cannot collide with another plugin's
+    # `state.py` and cannot go stale behind a reloaded entry module.
+    from research_os_impl.state import read_claims, read_map
+except ImportError:
+    try:
+        from .state import read_claims, read_map
+    except ImportError:  # loaded flat inside the Hermes plugin directory
+        from state import read_claims, read_map  # type: ignore[no-redef]
 
 # The four claim types, stated as the agent's own working vocabulary.
 CLAIM_RULES = """写作时区分四类断言，并且每一条都要用

@@ -22,19 +22,30 @@ import re
 from typing import Any
 
 try:
-    from .state import (
+    # Private namespace first: the plugin loads its modules under
+    # `research_os_impl.*` so they cannot collide with another plugin's
+    # `state.py` and cannot go stale behind a reloaded entry module.
+    from research_os_impl.state import (
         INFERENCE_TYPES,
         STRENGTHS,
         STRENGTH_RANK,
         read_claims,
     )
-except ImportError:  # loaded flat inside the Hermes plugin directory
-    from state import (  # type: ignore[no-redef]
-        INFERENCE_TYPES,
-        STRENGTHS,
-        STRENGTH_RANK,
-        read_claims,
-    )
+except ImportError:
+    try:
+        from .state import (
+            INFERENCE_TYPES,
+            STRENGTHS,
+            STRENGTH_RANK,
+            read_claims,
+        )
+    except ImportError:  # loaded flat inside the Hermes plugin directory
+        from state import (  # type: ignore[no-redef]
+            INFERENCE_TYPES,
+            STRENGTHS,
+            STRENGTH_RANK,
+            read_claims,
+        )
 
 # Wording that presents a hypothesis or an inference as settled fact.
 OVERCLAIM_PATTERNS = (

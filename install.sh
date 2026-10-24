@@ -48,10 +48,8 @@ fi
 echo "==> Installing plugin into $PLUGIN_DIR"
 mkdir -p "$PLUGIN_DIR"
 cp "$SRC/plugin.yaml" "$PLUGIN_DIR/"
-cp "$SRC/research_os/__init__.py" "$PLUGIN_DIR/"
-for f in state classify protocol validate; do
-  cp "$SRC/research_os/$f.py" "$PLUGIN_DIR/"
-done
+# Every module in the package, so adding one never needs this script edited.
+cp "$SRC"/research_os/*.py "$PLUGIN_DIR/"
 find "$PLUGIN_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---------------------------------------------------------------- state tree

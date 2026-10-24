@@ -17,10 +17,10 @@ echo "target:  $PLUGIN_DIR"
 
 mkdir -p "$PLUGIN_DIR"
 cp "$REPO/plugin.yaml" "$PLUGIN_DIR/"
-cp "$REPO/research_os/__init__.py" "$PLUGIN_DIR/"
-for f in state classify protocol validate; do
-  cp "$REPO/research_os/$f.py" "$PLUGIN_DIR/"
-done
+# Every module in the package is copied, so adding a module never needs this
+# script edited. `__init__.py` is included; the package copy is only for the
+# repo's own test suite.
+cp "$REPO"/research_os/*.py "$PLUGIN_DIR/"
 find "$PLUGIN_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 echo "installed:"

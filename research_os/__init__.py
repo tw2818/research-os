@@ -29,14 +29,61 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+
+def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
+    """Load the implementation modules under a private namespace.
+
+    Two problems this avoids.
+
+    *Name collision.* Hermes imports a plugin's modules flat, so `state` and
+    `classify` land in `sys.modules` as top-level names shared with the whole
+    process. A different plugin that ships a `state.py` silently wins.
+
+    *Stale code.* `hermes plugins enable` re-imports the plugin's entry module
+    but does not evict its flat siblings, so a new `__init__.py` can call a
+    new function in an old `state.py` and get an AttributeError — which the
+    hook then swallows, and the guard stops firing.
+
+    Loading the modules by path under a private namespace makes both
+    impossible: the names cannot collide, and the entry module controls the
+    lifetime of its own submodules.
+    """
+    import importlib.util
+
+    ns = "research_os_impl"
+    # Drop the previous generation so a reload always picks up the new code.
+    for name in [n for n in sys.modules if n == ns or n.startswith(ns + ".")]:
+        sys.modules.pop(name, None)
+
+    mods: dict[str, Any] = {}
+    # `state` first: `protocol` and `validate` import it at module level, so
+    # it must exist in sys.modules before they are executed.
+    for short in ("state", "audit", "classify", "protocol", "validate"):
+        full = f"{ns}.{short}"
+        spec = importlib.util.spec_from_file_location(full, _HERE / f"{short}.py")
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {short}.py from {_HERE}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[full] = module
+        spec.loader.exec_module(module)
+        mods[short] = module
+    return (
+        mods["audit"],
+        mods["classify"],
+        mods["protocol"],
+        mods["state"],
+        mods["validate"],
+    )
+
+
 try:
-    import classify as _classify
-    import protocol as _protocol
-    import state as _state
-except ImportError:  # loaded as a package (repo layout: research_os/)
+    _audit, _classify, _protocol, _state, _validate = _load_impl_modules()
+except Exception:  # pragma: no cover - package layout (repo / tests)
+    from . import audit as _audit  # type: ignore[no-redef]
     from . import classify as _classify  # type: ignore[no-redef]
     from . import protocol as _protocol  # type: ignore[no-redef]
     from . import state as _state  # type: ignore[no-redef]
+    from . import validate as _validate  # type: ignore[no-redef]
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +443,36 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         else:
             return None
 
+        # The turn is in research mode. Has it gathered evidence it has not
+        # accounted for? This is checked here, before the agent writes its
+        # answer, because afterwards the evidence lives only in the chat.
+        note = _accounting_note(topic, kwargs.get("conversation_history") or [])
+        if note:
+            ctx = f"{ctx}\n\n{note}"
+
         return {"context": ctx}
     except Exception:
         return None
+
+
+def _accounting_note(topic: str, history: list[Any]) -> str:
+    """Ask for the ledger to be filled when the turn used evidence without
+    recording it. Empty string when there is nothing to say."""
+    scan = _audit.scan_turn(history)
+    if scan["evidence_calls"] == 0:
+        return ""
+    if scan["ledger_calls"] > 0:
+        return ""
+    n = scan["evidence_calls"]
+    what = f"{n} 次检索" if n > 1 else "一次检索"
+    return (
+        f"[Research OS · 账本还是空的]\n"
+        f"这轮做了{what}，但账本里一条断言都没有——这些证据现在只存在于聊天记录里，"
+        f"下一个会话就找不回来了。\n"
+        f"动笔前先用 research_mode(action='claim', project='{topic}', claim={{...}}) "
+        f"把用到的证据记进去：观察和转述要填 source（PMID/DOI），"
+        f"推论要填 premises 和 inference_type，假设标成 hypothesis。"
+    )
 
 
 # Tools that constitute a literature search. Reaching for one of these while

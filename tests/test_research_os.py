@@ -15,7 +15,7 @@ os.environ["RESEARCH_OS_HOME"] = _TMP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from research_os import classify, protocol, state  # noqa: E402
+from research_os import audit, classify, protocol, state  # noqa: E402
 from research_os.validate import validate_claims  # noqa: E402
 
 
@@ -217,6 +217,99 @@ def test_chore_about_object_with_research_words_stays_chore():
 
 def test_idle_for_unclear():
     assert classify.classify("你好") == "idle"
+
+
+# --------------------------------------------------------------------------
+# accounting: evidence used but not recorded
+# --------------------------------------------------------------------------
+
+
+def _tool_msg(name, content):
+    return {"role": "tool", "name": name, "tool_name": name, "content": content}
+
+
+def test_scan_turn_counts_evidence_tools():
+    h = [
+        _tool_msg("mcp__pubmed__pubmed_search_articles", "found PMID: 10000001"),
+        _tool_msg("web_search", "PMID 23098294 result"),
+        _tool_msg("read_file", "some file"),
+    ]
+    s = audit.scan_turn(h)
+    assert s["evidence_calls"] == 2
+    assert s["ledger_calls"] == 0
+    assert s["citations"] == 2
+
+
+def test_scan_turn_notices_ledger_use():
+    h = [
+        _tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001"),
+        _tool_msg("research_mode", "recorded L1"),
+    ]
+    s = audit.scan_turn(h)
+    assert s["evidence_calls"] == 1
+    assert s["ledger_calls"] == 1
+
+
+def test_accounting_note_fires_when_evidence_unaccounted():
+    m = _handler()
+    history = [_tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001")]
+    note = m._accounting_note("T-acc", history)
+    assert "账本" in note
+    assert "research_mode" in note
+    assert "claim" in note
+
+
+def test_accounting_note_silent_when_ledger_used():
+    m = _handler()
+    history = [
+        _tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001"),
+        _tool_msg("research_mode", "recorded L1"),
+    ]
+    assert m._accounting_note("T-acc", history) == ""
+
+
+def test_accounting_note_silent_without_evidence():
+    m = _handler()
+    assert m._accounting_note("T-acc", [_tool_msg("read_file", "x")]) == ""
+    assert m._accounting_note("T-acc", []) == ""
+
+
+def test_assertive_sentences_ignores_hedged():
+    text = (
+        "Wang 2016 的 meta 分析表明睡眠剥夺后陈述性记忆评分下降。"
+        "这可能说明认知损伤不能还原为当前情绪状态。"
+    )
+    s = audit.assertive_sentences(text)
+    assert any("Wang 2016" in x for x in s)
+    assert not any("这可能说明" in x for x in s), s
+
+
+def test_unaccounted_sentences_flags_what_is_not_in_the_ledger():
+    text = "Wang 2016 的 meta 分析表明睡眠剥夺后陈述性记忆评分下降。"
+    assert audit.unaccounted_sentences(text, "") != []
+    known = "Wang 2016 的 meta 分析表明睡眠剥夺后陈述性记忆评分下降。"
+    assert audit.unaccounted_sentences(text, known) == []
+
+
+def test_audit_injection_reaches_the_turn():
+    """The note must actually reach the agent, appended to the research block."""
+    m = _handler()
+    sid = "t-audit"
+    m._tool_handler(
+        {"action": "create", "project": "AuditTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "AuditTopic"}, session_id=sid)
+    out = m._pre_llm_call(
+        session_id=sid,
+        user_message="继续这个课题",
+        turn_id="turn-1",
+        conversation_history=[
+            _tool_msg("mcp__pubmed__pubmed_search_articles", "PMID 10000001")
+        ],
+    )
+    assert out is not None
+    assert "账本还是空的" in out["context"], out["context"][:300]
 
 
 # --------------------------------------------------------------------------

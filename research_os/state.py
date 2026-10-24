@@ -340,3 +340,34 @@ def set_session_mode(session_id: str, mode: str, topic: str = "") -> dict[str, A
     s["updated_at"] = now()
     write_session(session_id, s)
     return s
+
+
+# --------------------------------------------------------------------------
+# per-turn verdicts
+# --------------------------------------------------------------------------
+# pre_tool_call cannot see the user message or the conversation, so a verdict
+# that depends on them has to be recorded by an earlier hook in the same turn
+# and read back. The turn id scopes the record: a verdict from a previous turn
+# is stale and must not be applied to this one.
+
+
+def mark_turn(session_id: str, turn_id: str, synthetic: bool) -> None:
+    s = read_session(session_id)
+    s["turn_id"] = turn_id
+    s["turn_synthetic"] = bool(synthetic)
+    s["updated_at"] = now()
+    write_session(session_id, s)
+
+
+def turn_is_synthetic(session_id: str, turn_id: str) -> bool:
+    """True only when *this* turn was recorded as synthetic.
+
+    An empty turn id means the caller cannot scope the verdict, so the
+    recorded one is used; the record is written by the same process moments
+    earlier in the same turn.
+    """
+    s = read_session(session_id)
+    recorded = str(s.get("turn_id") or "")
+    if turn_id and recorded and recorded != turn_id:
+        return False
+    return bool(s.get("turn_synthetic"))

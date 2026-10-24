@@ -344,7 +344,13 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         # System-generated turns carry quoted commands, so their bodies contain
         # whatever research words the original command had. They are never
         # research requests, and injecting a protocol for one is noise.
-        if _classify.is_synthetic(message):
+        #
+        # pre_tool_call cannot see the user message, so the verdict is recorded
+        # here, scoped to this turn, and read back by the search guard.
+        turn_id = str(kwargs.get("turn_id") or "")
+        synthetic = _classify.is_synthetic(message)
+        _state.mark_turn(session_id, turn_id=turn_id, synthetic=synthetic)
+        if synthetic:
             return None
 
         s = _state.read_session(session_id)
@@ -431,13 +437,11 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         if s.get("mode") == "research" and s.get("topic"):
             return None
 
-        # If the turn that asked for this search was a system-generated one
-        # (a background-process notice quoting an old command), the search is
-        # not research work and must not be held hostage to a topic.
-        message = kwargs.get("user_message") or ""
-        if isinstance(message, (list, dict)):
-            message = ""
-        if _classify.is_synthetic(str(message)):
+        # pre_tool_call cannot see the user message or the conversation. The
+        # turn's synthetic/not verdict was recorded by pre_llm_call, which runs
+        # earlier in the same turn, and is read back here. If the turn id does
+        # not match, the verdict is stale and must not be trusted.
+        if _state.turn_is_synthetic(session_id, str(kwargs.get("turn_id") or "")):
             return None
 
         topics = _state.list_topics()

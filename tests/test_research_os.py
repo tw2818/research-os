@@ -262,21 +262,67 @@ def test_real_research_question_still_classified():
     assert not classify.is_synthetic(q)
 
 
+def test_pre_tool_call_really_has_no_user_message():
+    """Guard against re-introducing a dead guard.
+
+    Hermes' pre_tool_call kwargs do not include the user message. A guard that
+    reads it silently gets an empty string and never fires. This asserts the
+    plugin does not depend on it, by checking the recorded-turn path is the
+    only channel it uses.
+    """
+    import inspect
+    src = inspect.getsource(_handler()._pre_tool_call)
+    assert "user_message" not in src, (
+        "pre_tool_call cannot see the user message; use the recorded turn verdict"
+    )
+
+
 def test_synthetic_turn_never_blocks_a_search():
+    """pre_tool_call cannot see the user message — the verdict has to travel
+    through the session state that pre_llm_call wrote in the same turn."""
     m = _handler()
+    sid = "t-synth"
+    # pre_llm_call runs first in a real turn and records the verdict.
+    out_llm = m._pre_llm_call(session_id=sid, user_message=BG_NOTICE, turn_id="turn-1")
+    assert out_llm is None, out_llm
+    # Now the tool call in that same turn.
     out = m._pre_tool_call(
-        tool_name="web_search",
-        args={},
-        session_id="t-synth",
-        user_message=BG_NOTICE,
+        tool_name="web_search", args={}, session_id=sid, turn_id="turn-1"
     )
     assert out is None, out
 
 
 def test_synthetic_turn_gets_no_injection():
     m = _handler()
-    out = m._pre_llm_call(session_id="t-synth2", user_message=BG_NOTICE)
+    out = m._pre_llm_call(session_id="t-synth2", user_message=BG_NOTICE, turn_id="t-2")
     assert out is None, out
+
+
+def test_stale_turn_verdict_does_not_block():
+    """A synthetic verdict from an earlier turn must not exempt this turn."""
+    m = _handler()
+    sid = "t-stale"
+    m._pre_llm_call(session_id=sid, user_message=BG_NOTICE, turn_id="turn-1")
+    # A new turn arrives with a real question; the recorded verdict is stale.
+    out = m._pre_tool_call(
+        tool_name="web_search", args={}, session_id=sid, turn_id="turn-2"
+    )
+    assert out is not None and out.get("action") == "block", out
+
+
+def test_real_turn_search_is_blocked_without_a_topic():
+    """The guard still bites on a genuine turn."""
+    m = _handler()
+    sid = "t-real"
+    m._pre_llm_call(
+        session_id=sid,
+        user_message="证据能区分控制环路异常和情绪干扰吗？",
+        turn_id="turn-1",
+    )
+    out = m._pre_tool_call(
+        tool_name="web_search", args={}, session_id=sid, turn_id="turn-1"
+    )
+    assert out is not None and out.get("action") == "block", out
 
 
 def test_explicit_research_command_wins():

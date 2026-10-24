@@ -252,6 +252,67 @@ def test_research_block_respects_cap():
     assert len(block) <= 300, len(block)
 
 
+def test_research_block_keeps_the_claim_tool_call():
+    """The block must name the tool call, not just the concept of a ledger —
+    an agent told to "use the ledger" writes claims into prose."""
+    _fresh_topic("T-p3", "Q?")
+    block = protocol.build_research_block("T-p3", {"max_inject_chars": 900})
+    assert "research_mode" in block
+    assert "action='claim'" in block or "action=\"claim\"" in block
+
+
+def test_research_block_truncation_keeps_claim_instruction():
+    _fresh_topic("T-p4", "Q" * 3000)
+    block = protocol.build_research_block("T-p4", {"max_inject_chars": 500})
+    assert len(block) <= 500
+    assert "claim" in block
+
+
+def test_bundled_observation_and_conclusion_is_split():
+    """The real failure the ledger exists to catch: one row carrying both the
+    observation and the conclusion drawn from it."""
+    _fresh_topic("T-bundle")
+    state.append_claim("T-bundle", {
+        "kind": "report",
+        "content": (
+            "Sleep deprivation lowers objective memory scores, so sleep-related "
+            "cognitive impairment cannot be reduced to concurrent emotional state: "
+            "Wang 2016 (PMID 10000001) found moderate executive deficits"
+        ),
+        "source": "PMID 10000001",
+    })
+    r = validate_claims("T-bundle")
+    assert any(e["code"] == "bundled_claim" for e in r["errors"]), r
+
+
+def test_pure_observation_is_not_flagged_as_bundled():
+    _fresh_topic("T-bundle2")
+    state.append_claim("T-bundle2", {
+        "kind": "observation",
+        "content": "Wang 2016 meta-analysis found moderate executive function deficits in after sleep deprivation",
+        "source": "PMID 10000001",
+    })
+    r = validate_claims("T-bundle2")
+    assert not any(e["code"] == "bundled_claim" for e in r["errors"]), r
+
+
+def test_inference_with_conclusion_wording_is_not_bundled():
+    """An inference is *supposed* to carry a conclusion — only observations and
+    reports get split."""
+    _fresh_topic("T-bundle3")
+    state.append_claim("T-bundle3", {
+        "kind": "observation", "content": "obs", "source": "PMID 1",
+    })
+    state.set_claim_status("T-bundle3", "L1", "verified")
+    state.append_claim("T-bundle3", {
+        "kind": "inference",
+        "content": "the finding therefore suggests that cognition and mood dissociate",
+        "inference_type": "explanatory", "premises": "L1",
+    })
+    r = validate_claims("T-bundle3")
+    assert not any(e["code"] == "bundled_claim" for e in r["errors"]), r
+
+
 def test_idle_block_mentions_the_tool():
     b = protocol.build_idle_block()
     assert "research_mode" in b

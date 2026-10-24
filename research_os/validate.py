@@ -46,6 +46,20 @@ OVERCLAIM_PATTERNS = (
     (re.compile(r"彻底解决"), "彻底解决"),
 )
 
+# Markers that a single claim bundles an observation with a conclusion drawn
+# from it. A claim like "X was found in 3 studies, therefore Y" is two claims
+# wearing one coat, and collapsing them is exactly the failure the ledger
+# exists to catch.
+_CONCLUSION_MARKERS = (
+    "因此", "所以", "由此", "故而", "可见", "也就是说", "换言之", "据此",
+    "这提示", "这表明", "这说明", "这意味着", "说明", "表明",
+    "therefore", "thus", "hence", "consequently", "as a result",
+    "implying", "meaning that", "so that", ", so ",
+    "cannot be", "can not be", "cannot", "is not", "isn't", "must be",
+    "implies", "suggests that", "indicates that", "demonstrates that",
+    "points to", "reflects",
+)
+
 # A source field that looks like a real citation rather than a placeholder.
 _SOURCE_OK = re.compile(r"(PMID|DOI|10\.\d{4,}|arxiv|et al\.?|等,|卷|页|\[\d+\])", re.I)
 _PLACEHOLDER = re.compile(r"^(待补|tbd|todo|n/?a|unknown|xxx|-|\.\.\.|pending)$", re.I)
@@ -56,6 +70,39 @@ def _norm_premises(raw: str) -> list[str]:
         return []
     parts = re.split(r"[,;\s]+", raw.strip())
     return [p for p in parts if p]
+
+
+def _find_bundled_conclusion(content: str) -> tuple[str, str] | None:
+    """Return (observation_part, conclusion_part) if one claim carries both.
+
+    The split point is a clause boundary followed by a conclusion marker. The
+    observation part must be substantial (20+ chars) and the conclusion part
+    must be substantial (10+ chars) — otherwise this is a single claim that
+    merely happens to contain the word "shows".
+    """
+    low = content.lower()
+    best: tuple[int, str, str] | None = None
+    for marker in _CONCLUSION_MARKERS:
+        start = 0
+        while True:
+            i = low.find(marker, start)
+            if i < 0:
+                break
+            start = i + 1
+            # Prefer a marker right after a clause boundary.
+            head = content[:i].rstrip(" ,;:，、")
+            tail = content[i:].strip()
+            # A marker at position 0 has no observation part.
+            if len(head) < 20 or len(tail) < 10:
+                continue
+            # The head must end like a finding, not mid-phrase.
+            if not re.search(r"[a-zA-Z0-9\)\u4e00-\u9fff][\)\.\u4e00-\u9fff]?$", head):
+                continue
+            if best is None or i < best[0]:
+                best = (i, head, tail)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def validate_claims(topic: str) -> dict[str, Any]:
@@ -165,6 +212,22 @@ def validate_claims(topic: str) -> dict[str, Any]:
                 if pat.search(content):
                     warn(cid, "overclaim_phrasing", f"inference wording claims too much: {label}")
                     break
+
+        # --- bundled observation + conclusion -----------------------------
+        if kind in ("observation", "report"):
+            split = _find_bundled_conclusion(content)
+            if split:
+                head, tail = split
+                err(
+                    cid,
+                    "bundled_claim",
+                    "this claim bundles an observation with a conclusion. Split it: "
+                    f"keep the observation as '{head[:60]}...' and record the conclusion "
+                    f"as a separate inference whose premises point at this row. "
+                    f"bundled tail: '{tail[:60]}...'",
+                )
+
+        # --- generic overclaim check -------------------------------------
 
     return {
         "topic": topic,

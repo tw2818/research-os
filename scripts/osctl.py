@@ -17,16 +17,16 @@ import sys
 from pathlib import Path
 
 # The CLI runs from three places: the repo (research_os/ is one level up),
-# and the installed state tree (the modules sit flat in the plugin
-# directory). Find the modules either way, or the CLI is useless the moment
-# it is installed.
+# the installed state tree (the modules sit flat next to this script), and
+# the plugin directory. Find the modules in whichever layout applies, or the
+# CLI is useless the moment it is installed.
 _HERE = Path(__file__).resolve().parent
 for _candidate in (_HERE.parent, _HERE.parent.parent):
     if (_candidate / "research_os" / "__init__.py").is_file():
         sys.path.insert(0, str(_candidate))
         break
 else:
-    for _candidate in (_HERE.parent.parent, _HERE.parent):
+    for _candidate in (_HERE, _HERE.parent, _HERE.parent.parent):
         if (_candidate / "state.py").is_file():
             sys.path.insert(0, str(_candidate))
             break

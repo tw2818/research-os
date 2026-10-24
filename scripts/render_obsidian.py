@@ -26,7 +26,7 @@ for _candidate in (_HERE.parent, _HERE.parent.parent):
         sys.path.insert(0, str(_candidate))
         break
 else:
-    for _candidate in (_HERE.parent.parent, _HERE.parent):
+    for _candidate in (_HERE, _HERE.parent, _HERE.parent.parent):
         if (_candidate / "state.py").is_file():
             sys.path.insert(0, str(_candidate))
             break

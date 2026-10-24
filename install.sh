@@ -59,10 +59,17 @@ echo "==> Initialising state at $STATE_HOME"
 python3 "$SRC/scripts/osctl.py" init ${VAULT:+--vault "$VAULT"} >/dev/null
 
 # Keep the CLI and the renderer next to the state, so they stay available
-# after the temporary clone is gone.
+# after the temporary clone is gone. The modules go with them: the CLI has to
+# work from this directory, not from the plugin directory it was written in.
+# `__init__.py` is left out — it would turn the directory into a package and
+# break the flat imports the CLI falls back to.
 mkdir -p "$STATE_HOME/bin"
 cp "$SRC/scripts/osctl.py" "$STATE_HOME/bin/osctl.py"
 cp "$SRC/scripts/render_obsidian.py" "$STATE_HOME/bin/render_obsidian.py"
+for _mod in state validate audit classify protocol; do
+  cp "$SRC/research_os/$_mod.py" "$STATE_HOME/bin/"
+done
+find "$STATE_HOME/bin" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---------------------------------------------------------------- enable
 if command -v hermes >/dev/null 2>&1; then

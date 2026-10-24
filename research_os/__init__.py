@@ -849,11 +849,6 @@ def _state_tree_spans(text: str) -> list[tuple[int, int]]:
     return merged
 
 
-# What makes a path a write target rather than a source.
-_WRITE_BEFORE = (
-    ">", "tee ", "sed -i", "truncate ", "dd ", "shred ", "install ",
-    "rm ", "unlink",
-)
 _WRITE_AFTER = (
     "'w'", '"w"', "'a'", '"a"', "'w+'", '"w+"', "'a+'", '"a+"',
     "'x'", '"x"', "'wb'", '"wb"', "'ab'", '"ab"',
@@ -881,8 +876,17 @@ def _is_write_target(text: str, span: tuple[int, int]) -> bool:
     # statement — the same rule as for the window before.
     if "\n" in after:
         after = after.split("\n", 1)[0]
-    for marker in _WRITE_BEFORE:
-        if marker in line:
+
+    # A redirect counts only when the path is what it redirects to. The
+    # operator has to be immediately to the left of the path: `2>&1` and
+    # `> /dev/null` are everywhere and mean nothing here.
+    stripped = line.rstrip()
+    for redirect in (">>", ">"):
+        if stripped.endswith(redirect):
+            return True
+    for op in ("tee ", "sed -i", "truncate ", "dd ", "shred ", "install ",
+               "rm ", "unlink"):
+        if stripped.endswith(op.rstrip()) or (" " + op) in line:
             return True
     for marker in _WRITE_AFTER:
         if marker in after:

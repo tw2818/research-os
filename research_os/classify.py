@@ -44,6 +44,31 @@ CHORE_OBJECT = (
 
 _QUESTION_MARK = re.compile(r"[?？]|吗|呢|如何|怎么|是不是|有没有|该不该|行不行")
 
+# System-generated turns are not user turns. Hermes injects these as user
+# messages (background-process completions, async batch notices, skill-index
+# updates, memory recalls). Their bodies quote the original command, so they
+# carry whatever research words that command contained — classifying on the
+# text alone would open research mode on a system notice. The prefixes match
+# Hermes' own synthetic-prompt pattern (hermes_state_timeline._SYNTHETIC_PROMPT).
+_SYNTHETIC_PREFIX = re.compile(
+    r"^\s*(?:\[IMPORTANT: Background process |"
+    r"\[ASYNC (?:DELEGATION )?(?:BATCH )?COMPLETE\b|"
+    r"A background fan-out of \d+ subagent\(s\) you dispatched earlier has finished\.|"
+    r"A background subagent you dispatched earlier has finished\.|"
+    r"\[INTERNAL NOTIFICATION|"
+    r"\[System: |"
+    r"\[Skills?:|"
+    r"\[Memory|"
+    r"<memory-context>|"
+    r"\[Research OS)",
+    re.IGNORECASE,
+)
+
+
+def is_synthetic(message: str) -> bool:
+    """True for a turn the system generated rather than the user typed."""
+    return bool(_SYNTHETIC_PREFIX.match((message or "").lstrip()))
+
 
 def classify(
     message: str,
@@ -56,6 +81,11 @@ def classify(
     """
     text = (message or "").strip()
     if not text:
+        return "idle"
+
+    # A system-generated turn is never a research request, no matter what its
+    # body says — its body quotes the original command.
+    if is_synthetic(text):
         return "idle"
 
     low = text.lower()

@@ -219,6 +219,66 @@ def test_idle_for_unclear():
     assert classify.classify("你好") == "idle"
 
 
+# --------------------------------------------------------------------------
+# system-generated turns are not user turns
+# --------------------------------------------------------------------------
+
+# A real background-process notification, verbatim in shape. Its body quotes
+# a research question, which is exactly why it used to be misclassified.
+BG_NOTICE = (
+    "[IMPORTANT: Background process proc_4dcbcef35a86 completed normally (exit code 0).\n"
+    "Command: cd /home/twebery && nohup timeout 900 hermes chat --oneshot -Q -q "
+    '"为什么睡眠剥夺会损伤陈述性记忆？现有证据能区分「控制环路本身异常」'
+    '和「情绪干扰占用资源」这两种解释吗？"\n'
+    "Output:\nstarted"
+)
+
+
+def test_background_notice_is_not_research():
+    assert classify.classify(BG_NOTICE) == "idle"
+    assert classify.is_synthetic(BG_NOTICE)
+
+
+def test_memory_context_block_is_not_research():
+    m = "<memory-context>\n[System note: recalled memory]\n研究综述 睡眠 记忆\n</memory-context>"
+    assert classify.classify(m) == "idle"
+    assert classify.is_synthetic(m)
+
+
+def test_system_note_is_not_research():
+    m = "[System: The skills available in this conversation changed after its system prompt was built.]"
+    assert classify.classify(m) == "idle"
+
+
+def test_async_batch_notice_is_not_research():
+    m = "[ASYNC DELEGATION BATCH COMPLETE] 3 subagents finished, 证据检索 done"
+    assert classify.classify(m) == "idle"
+
+
+def test_real_research_question_still_classified():
+    # The guard must not swallow the real thing.
+    q = "为什么睡眠剥夺会损伤陈述性记忆？"
+    assert classify.classify(q) == "research"
+    assert not classify.is_synthetic(q)
+
+
+def test_synthetic_turn_never_blocks_a_search():
+    m = _handler()
+    out = m._pre_tool_call(
+        tool_name="web_search",
+        args={},
+        session_id="t-synth",
+        user_message=BG_NOTICE,
+    )
+    assert out is None, out
+
+
+def test_synthetic_turn_gets_no_injection():
+    m = _handler()
+    out = m._pre_llm_call(session_id="t-synth2", user_message=BG_NOTICE)
+    assert out is None, out
+
+
 def test_explicit_research_command_wins():
     assert classify.classify("/research Sleep-Memory") == "research"
 

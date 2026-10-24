@@ -341,6 +341,12 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             message = json.dumps(message, ensure_ascii=False)
         message = str(message)
 
+        # System-generated turns carry quoted commands, so their bodies contain
+        # whatever research words the original command had. They are never
+        # research requests, and injecting a protocol for one is noise.
+        if _classify.is_synthetic(message):
+            return None
+
         s = _state.read_session(session_id)
         mode = s.get("mode", "idle")
         topic = s.get("topic", "")
@@ -423,6 +429,15 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         session_id = str(kwargs.get("session_id") or "unknown")
         s = _state.read_session(session_id)
         if s.get("mode") == "research" and s.get("topic"):
+            return None
+
+        # If the turn that asked for this search was a system-generated one
+        # (a background-process notice quoting an old command), the search is
+        # not research work and must not be held hostage to a topic.
+        message = kwargs.get("user_message") or ""
+        if isinstance(message, (list, dict)):
+            message = ""
+        if _classify.is_synthetic(str(message)):
             return None
 
         topics = _state.list_topics()

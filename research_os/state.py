@@ -249,7 +249,15 @@ def read_claims(topic: str) -> list[dict[str, str]]:
         parts = _split_tsv(line)
         parts += [""] * (len(header) - len(parts))
         rows.append({header[i]: parts[i] for i in range(len(header))})
+    # Ids are L1, L2, ... L10 — a string sort puts L10 before L2. Sort by the
+    # number so the ledger reads in the order it was written.
+    rows.sort(key=_claim_id_number)
     return rows
+
+
+def _claim_id_number(claim: dict[str, str]) -> int:
+    match = re.search(r"(\d+)", str(claim.get("id") or ""))
+    return int(match.group(1)) if match else 0
 
 
 def write_claims(topic: str, claims: list[dict[str, str]]) -> None:
@@ -268,6 +276,33 @@ def next_claim_id(topic: str) -> str:
         if m:
             n = max(n, int(m.group(1)))
     return f"L{n + 1}"
+
+
+def _content_key(content: str) -> str:
+    """A comparison key for a claim's content.
+
+    Two claims are the same finding when they say the same thing. Whitespace,
+    case and trailing punctuation differ between two attempts to record the
+    same observation, so they are normalised away before comparison.
+    """
+    text = " ".join(str(content or "").split()).strip().lower()
+    return text.rstrip("。．.!！?？;；,，")
+
+
+def find_claim(topic: str, content: str) -> dict[str, str] | None:
+    """The claim that already says this, if there is one.
+
+    The same finding, recorded twice, is not two pieces of evidence. It
+    makes the ledger look bigger than the evidence is, and every inference
+    that cites it has to be checked against both copies.
+    """
+    key = _content_key(content)
+    if not key:
+        return None
+    for claim in read_claims(topic):
+        if _content_key(claim.get("content") or "") == key:
+            return claim
+    return None
 
 
 def append_claim(topic: str, claim: dict[str, str]) -> dict[str, str]:
@@ -300,6 +335,17 @@ def append_claim(topic: str, claim: dict[str, str]) -> dict[str, str]:
 
     claims = read_claims(topic)
     claims = [c for c in claims if c.get("id") != row["id"]]
+
+    # The same finding, recorded twice, is not two pieces of evidence. It
+    # makes the ledger look bigger than the evidence is, and every inference
+    # that cites it has to be checked against both copies. Return the
+    # existing row instead of adding a second one.
+    content_key = _content_key(row.get("content") or "")
+    if content_key:
+        for existing in claims:
+            if _content_key(existing.get("content") or "") == content_key:
+                return existing
+
     claims.append(row)
     write_claims(topic, claims)
     return row

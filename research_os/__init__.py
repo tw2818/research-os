@@ -137,6 +137,10 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'repair' rebuilds missing topic state. "
         "ACTION 'claim' records a claim in the topic ledger (kind: observation/report/"
         "inference/hypothesis) and ACTION 'validate' checks the ledger. "
+        "ACTION 'contradict' records a competing explanation and what evidence would "
+        "separate it (title + separator — a contradiction with no way to resolve it is "
+        "just a worry). ACTION 'question' records an open question. ACTION 'map' "
+        "updates the research map (core_question, hypotheses, tags, open_questions). "
         "Call 'on' when the user asks why something happens, whether evidence can "
         "separate explanations, for a literature review, for a hypothesis, or when a "
         "claim needs verification. Do NOT call for chores: file conversion, imports, "
@@ -149,6 +153,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "enum": [
                     "on", "off", "status", "list", "create", "switch",
+                    "contradict", "question", "map",
                     "delete", "claim", "validate", "repair",
                 ],
                 "description": "What to do.",
@@ -175,6 +180,29 @@ TOOL_SCHEMA: dict[str, Any] = {
             "permanent": {
                 "type": "boolean",
                 "description": "For delete: skip the trash and remove outright. Default false.",
+            },
+            "title": {
+                "type": "string",
+                "description": (
+                    "For action 'contradict': the competing explanation, stated as a "
+                    "claim about the world that could be wrong."
+                ),
+            },
+            "separator": {
+                "type": "string",
+                "description": (
+                    "For action 'contradict': what evidence would tell the competing "
+                    "explanations apart. A contradiction with no way to resolve it is "
+                    "just a worry, so this is required."
+                ),
+            },
+            "question": {
+                "type": "string",
+                "description": "For action 'question': an open question that is still unresolved.",
+            },
+            "open_questions": {
+                "type": "string",
+                "description": "For action 'map': open questions, separated by ' | '.",
             },
             "claim": {
                 "type": "object",
@@ -393,8 +421,90 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             if not claim.get("content"):
                 return fail("claim.content is required")
             claim["premises"] = " ".join(_split_list(claim.get("premises"), sep=" "))
+            existing = _state.find_claim(project, claim.get("content") or "")
+            if existing is not None:
+                # The same finding, recorded twice, is not two pieces of
+                # evidence. Say so plainly so the agent stops repeating
+                # itself instead of re-recording what is already there.
+                return ok({
+                    "recorded": existing,
+                    "duplicate": True,
+                    "note": (
+                        f"这条已经在账本里了（{existing.get('id')}），没有重复记录。"
+                        f"如果你想记的是它的一个新推论，用 inference 并把 premises "
+                        f"指向 {existing.get('id')}。"
+                    ),
+                })
             row = _state.append_claim(project, claim)
             return ok({"recorded": row})
+
+        if action == "contradict":
+            # The competing explanations and what separates them. Without it
+            # the research map is a list of hypotheses with no way to tell
+            # them apart, which is the state the whole design is against.
+            if not project:
+                return fail("project is required")
+            title = str(args.get("title") or "").strip()
+            if not title:
+                return fail("title is required: what the contradiction is about")
+            separator = str(args.get("separator") or "").strip()
+            if not separator:
+                return fail(
+                    "separator is required: what evidence would tell the "
+                    "explanations apart. A contradiction with no way to "
+                    "resolve it is just a worry."
+                )
+            data = _state.read_contradictions(project) or {"items": []}
+            items = list(data.get("items") or [])
+            items.append(
+                {
+                    "title": title,
+                    "separator": separator,
+                    "hypotheses": _split_list(args.get("hypotheses"), sep="|"),
+                    "status": str(args.get("status") or "open"),
+                    "recorded_at": _state.now(),
+                }
+            )
+            data["items"] = items
+            data["updated_at"] = _state.now()
+            _state.write_contradictions(project, data)
+            return ok({"contradiction": items[-1], "count": len(items)})
+
+        if action == "question":
+            # An open question: what is still unresolved. Recording it is the
+            # only way the next session can pick it up.
+            if not project:
+                return fail("project is required")
+            text = str(args.get("question") or "").strip()
+            if not text:
+                return fail("question is required")
+            m = _state.read_map(project)
+            questions = list(m.get("open_questions") or [])
+            if text not in questions:
+                questions.append(text)
+            m["open_questions"] = questions
+            m["updated_at"] = _state.now()
+            _state.write_map(project, m)
+            return ok({"open_question": text, "count": len(questions)})
+
+        if action == "map":
+            # Update the research map: the hypotheses, the tags, the core
+            # question. The map is the current state of understanding and it
+            # is supposed to change as evidence accumulates.
+            if not project:
+                return fail("project is required")
+            m = _state.read_map(project)
+            if "core_question" in args and args.get("core_question"):
+                m["core_question"] = str(args["core_question"]).strip()
+            if "hypotheses" in args:
+                m["hypotheses"] = _split_list(args.get("hypotheses"), sep="|")
+            if "tags" in args:
+                m["tags"] = _split_list(args.get("tags"), sep=",")
+            if "open_questions" in args:
+                m["open_questions"] = _split_list(args.get("open_questions"), sep="|")
+            m["updated_at"] = _state.now()
+            _state.write_map(project, m)
+            return ok({"map": m})
 
         if action == "validate":
             if not project:
@@ -475,6 +585,13 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             gap = _accounting_note(topic, previous_activity)
             if gap:
                 ctx = f"{ctx}\n\n{gap}"
+            # The map has competing explanations but nothing separating them,
+            # or has judgments but no record of what is still open. The
+            # protocol block is capped, so this goes in only when there is
+            # actually a gap to point at.
+            missing = _map_gaps(topic)
+            if missing:
+                ctx = f"{ctx}\n\n{missing}"
         elif detected == "research":
             # A research question arrived while idle. The model will reach for
             # PubMed / web_search if nothing says otherwise, so the nudge has
@@ -506,6 +623,43 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         return {"context": ctx}
     except Exception:
         return None
+
+
+def _map_gaps(topic: str) -> str:
+    """Name what the research map is missing, if anything.
+
+    A topic with competing explanations but no recorded contradiction has not
+    said what would tell them apart — which is the question the whole design
+    is about. A topic with judgments but no open questions has not said where
+    it is still unsure, and the next session will read the record as if it
+    were complete.
+    """
+    try:
+        m = _state.read_map(topic)
+        hyp = [h for h in (m.get("hypotheses") or []) if str(h).strip()]
+        open_q = [q for q in (m.get("open_questions") or []) if str(q).strip()]
+        claims = _state.read_claims(topic)
+        has_judgment = any(c.get("kind") == "inference" for c in claims)
+        items = (_state.read_contradictions(topic) or {}).get("items") or []
+
+        wants = []
+        if len(hyp) >= 2 and not items:
+            wants.append(
+                f"这个课题有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们——"
+                f"用 research_mode(action='contradict', project='{topic}', "
+                f"title='<哪个解释>', separator='<什么证据能区分>') 补上。"
+            )
+        if has_judgment and not open_q:
+            wants.append(
+                f"已经下了判断，但没记下哪里还悬着——"
+                f"用 research_mode(action='question', project='{topic}', "
+                f"question='<还没解决的问题>') 记一条。"
+            )
+        if not wants:
+            return ""
+        return "[Research OS · 研究地图的缺口]\n" + "\n".join(wants)
+    except Exception:
+        return ""
 
 
 def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
@@ -572,11 +726,22 @@ def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
         _state.note_topic_reminder(topic)
 
         if claims:
+            # Show what is already recorded. Without this the agent has no way
+            # to know what it wrote earlier, and it records the same findings
+            # again — a live run did exactly that, duplicating five rows.
+            listed = "\n".join(
+                f"- {c.get('id')} [{c.get('kind')}] "
+                f"{str(c.get('content') or '')[:110]}"
+                for c in claims[-8:]
+            )
             body = (
-                f"这个课题已经检索了 {count} 次，账本里有 {len(claims)} 条断言。\n"
-                f"先把手里够用的证据用 research_mode(action='claim') 记下来"
+                f"这个课题已经检索了 {count} 次，账本里有 {len(claims)} 条断言：\n"
+                f"{listed}\n"
+                f"（只列了最后 8 条）\n"
+                f"先看这个清单：已经记过的不要再记一遍，重复的记录不算新的证据。"
+                f"缺什么就补什么——缺的用 research_mode(action='claim') 记下来"
                 f"（观察和转述填 source，推论填 premises 和 inference_type），"
-                f"然后用现有证据给出结论——不要为了再找一篇而无限检索。"
+                f"然后用现有证据给出结论，不要为了再找一篇而无限检索。"
             )
         else:
             body = (

@@ -597,6 +597,163 @@ def test_re_entering_a_topic_starts_a_fresh_count():
     assert state.topic_search_count("ConvE") == 0
 
 
+# --------------------------------------------------------------------------
+# duplicates
+# --------------------------------------------------------------------------
+
+
+def test_recording_the_same_claim_twice_does_not_duplicate_it():
+    """The same finding recorded twice is not two pieces of evidence. A live
+    run did exactly that: five rows duplicated."""
+    m = _handler()
+    sid = "t-dup"
+    m._tool_handler(
+        {"action": "create", "project": "DupTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    body = {
+        "kind": "observation",
+        "content": "Semkovska 2019: 73% of cognitive variables remain impaired",
+        "source": "PMID 31422920",
+    }
+    import json
+    first = json.loads(m._tool_handler(
+        {"action": "claim", "project": "DupTopic", "claim": body}, session_id=sid
+    ))
+    second = json.loads(m._tool_handler(
+        {"action": "claim", "project": "DupTopic", "claim": body}, session_id=sid
+    ))
+    assert len(state.read_claims("DupTopic")) == 1
+    assert second.get("duplicate") is True, second
+    assert first["recorded"]["id"] == second["recorded"]["id"]
+
+
+def test_a_duplicate_with_different_whitespace_is_still_a_duplicate():
+    m = _handler()
+    sid = "t-dup2"
+    m._tool_handler(
+        {"action": "create", "project": "DupTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler(
+        {"action": "claim", "project": "DupTopic2",
+         "claim": {"kind": "observation", "content": "A finding about X"}},
+        session_id=sid,
+    )
+    m._tool_handler(
+        {"action": "claim", "project": "DupTopic2",
+         "claim": {"kind": "observation", "content": "  a finding about x。  "}},
+        session_id=sid,
+    )
+    assert len(state.read_claims("DupTopic2")) == 1
+
+
+def test_claims_are_read_in_numeric_order():
+    m = _handler()
+    sid = "t-order"
+    m._tool_handler(
+        {"action": "create", "project": "OrderTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    for i in range(12):
+        m._tool_handler(
+            {"action": "claim", "project": "OrderTopic",
+             "claim": {"kind": "observation", "content": f"finding number {i}"}},
+            session_id=sid,
+        )
+    ids = [c["id"] for c in state.read_claims("OrderTopic")]
+    assert ids == [f"L{i}" for i in range(1, 13)], ids
+
+
+# --------------------------------------------------------------------------
+# research map gaps
+# --------------------------------------------------------------------------
+
+
+def test_contradict_records_a_contradiction_with_its_separator():
+    m = _handler()
+    sid = "t-contra"
+    m._tool_handler(
+        {"action": "create", "project": "ContraTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    import json
+    out = json.loads(m._tool_handler(
+        {"action": "contradict", "project": "ContraTopic",
+         "title": "缺损来自环路本身", "separator": "控制情绪后的执行功能差异是否仍存在"},
+        session_id=sid,
+    ))
+    assert "contradiction" in out
+    items = state.read_contradictions("ContraTopic")["items"]
+    assert len(items) == 1
+    assert items[0]["separator"]
+
+
+def test_contradict_requires_a_separator():
+    m = _handler()
+    sid = "t-contra2"
+    m._tool_handler(
+        {"action": "create", "project": "ContraTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    import json
+    out = json.loads(m._tool_handler(
+        {"action": "contradict", "project": "ContraTopic2", "title": "just a worry"},
+        session_id=sid,
+    ))
+    assert "error" in out, out
+
+
+def test_question_records_an_open_question():
+    m = _handler()
+    sid = "t-q"
+    m._tool_handler(
+        {"action": "create", "project": "QTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    import json
+    out = json.loads(m._tool_handler(
+        {"action": "question", "project": "QTopic", "question": "缓解的定义怎么统一"},
+        session_id=sid,
+    ))
+    assert "open_question" in out
+    assert state.read_map("QTopic")["open_questions"] == ["缓解的定义怎么统一"]
+
+
+def test_map_gap_is_reported_when_there_is_no_separator():
+    m = _handler()
+    sid = "t-gapmap"
+    m._tool_handler(
+        {"action": "create", "project": "GapMapTopic",
+         "core_question": "Q?",
+         "hypotheses": "H1 a|H2 b|H3 c"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "GapMapTopic"}, session_id=sid)
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t1")
+    assert out is not None
+    assert "研究地图的缺口" in out["context"], out["context"][-400:]
+
+
+def test_map_gap_is_quiet_once_filled():
+    m = _handler()
+    sid = "t-gapmap2"
+    m._tool_handler(
+        {"action": "create", "project": "GapMapTopic2",
+         "core_question": "Q?", "hypotheses": "H1 a|H2 b"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "GapMapTopic2"}, session_id=sid)
+    m._tool_handler(
+        {"action": "contradict", "project": "GapMapTopic2",
+         "title": "H1", "separator": "a measurement that separates them"},
+        session_id=sid,
+    )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t1")
+    assert out is not None
+    assert "研究地图的缺口" not in out["context"], out["context"][-300:]
+
+
 def test_transform_llm_output_flags_unaccounted_assertions():
     m = _handler()
     sid = "t-transform"

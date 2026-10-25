@@ -60,6 +60,7 @@ direction that was never chosen.
 | phase | what it is for |
 |---|---|
 | `scoping` | frame the question, list the explanations that could compete |
+| `diverging` | look for a counterexample to the current frame, or a different way of asking |
 | `evidence` | go find material, keep it tied to a question |
 | `weighing` | decide between the explanations, say what separates them |
 | `closing` | stop adding, write the conclusion |
@@ -68,6 +69,23 @@ direction that was never chosen.
 Each phase also states what it is *not* for ("scoping does not go looking
 for evidence yet", "closing does not add any"), which is how a request
 belonging to another phase gets noticed.
+
+**`diverging` exists because a project that only ever narrows settles
+into the first frame it found.** The phase asks for the counterexample
+rather than the supporting evidence: what observation would overturn the
+current reading, is there a completely different way to ask the question,
+and which materials the frame is treating as settled that were never
+checked. It produces leads worth chasing, not conclusions — the work goes
+back to `evidence` to look. What was looked for outside the frame is
+recorded (`set_state` with `exploration`), so the project knows it looked
+and did not find it.
+
+**The question itself can be redefined.** A project that runs long
+sometimes finds that the question it is answering is not the question
+worth answering. `set_state` with `core_question` and `question_reason`
+records that, and keeps the old question with the reason it was replaced
+— a question that quietly changed is a question the next session cannot
+place.
 
 **The global review** happens on a condition, not on demand: after enough
 searches or turns have piled up, the agent has to look at the whole
@@ -124,6 +142,40 @@ Inference types are recorded too, because they carry different obligations:
 
 ---
 
+## The literature library
+
+A claim needs a source, and a source is a thing that can be looked up
+again. A bare string in the ledger says "PMID 12345" and nothing else; an
+entry in the topic's library says what the source is, where it lives, and
+whether it can be re-read.
+
+| kind | what it is | the locator |
+|---|---|---|
+| `zotero` | a bibliography service holds it | the item key |
+| `file` | a document on disk | the path |
+| `ref` | a bare identifier, nothing behind it | the DOI or PMID |
+
+```python
+research_mode(action="source", project="X", source_kind="zotero",
+              source_locator="ABCD1234", source_title="A paper")
+# -> {"source": {"id": "S1", ...}, "cite_as": "S1 A paper [zotero:ABCD1234]"}
+
+research_mode(action="claim", project="X",
+              claim={"kind": "observation", "content": "...", "source": "S1"})
+# the ledger stores: S1 A paper [zotero:ABCD1234]
+```
+
+The id is what makes the source resolvable; the entry's own form is what
+makes the ledger readable without the library open. A source already in
+the library is not added twice.
+
+**The fallback is a real fallback.** The plugin cannot call a
+bibliography service, so it cannot ask whether one is there — but it can
+watch which tools the agent reaches for. If the agent is filing things in
+Zotero, the topic's sources go there; if it is not, they go to files, and
+`kind="file"` with the path is the whole answer. `literature_backend` in
+the config pins the preference (`auto`, `zotero`, `files`).
+
 ## Topics
 
 A topic is one research question and the state that accumulates around it:
@@ -138,6 +190,7 @@ A topic is one research question and the state that accumulates around it:
     decision-log.md         what was decided, what was abandoned, what would change it
     review.json             reviews made, the last verdict, whether it is paused
     search-count.json       searches run on this topic, and how often it was interrupted
+    sources.json            the literature library
 ```
 
 `research-map.json` is not a literature summary. It is the current state of
@@ -219,6 +272,35 @@ hermes plugins update research-os
 
 ---
 
+## The rendered notes
+
+Each topic renders to a set of notes:
+
+| file | what it is |
+|---|---|
+| `00-课题地图.md` | the map: what the project is, where it stands, what is left, and what the judgement rests on |
+| `00-当前认知.md` | the current view |
+| `01-证据账本.md` | the ledger |
+| `02-决策与转向.md` | the decision log |
+
+The map is the one to read first. It is written as prose in the order a
+researcher would want it — what the project is about, where it stands,
+what is still open, and what the judgement rests on — with the claim ids
+inline, so every statement in it can be traced back to the ledger.
+
+```bash
+python3 scripts/render_obsidian.py --topic X      # one topic
+python3 scripts/render_obsidian.py --all          # every topic
+python3 scripts/render_obsidian.py --all --plain  # plain markdown, no Obsidian syntax
+python3 scripts/render_obsidian.py --all --map-only
+```
+
+**Without Obsidian, the notes still get written.** A missing vault is not
+an error: the notes go to `~/.hermes/research-os/notes/<topic>/` as plain
+markdown, and the reader is told where they went. Set `require_vault` to
+`true` for the strict behaviour. `notes_dir` moves the fallback
+elsewhere.
+
 ## Configuration
 
 `~/.hermes/research-os/config.json`:
@@ -233,6 +315,9 @@ hermes plugins update research-os
 | `searches_before_converge` | `20` | searches on one topic before the agent is asked to record or conclude; `0` turns the check off |
 | `review_every_searches` | `8` | searches on one topic before a global review is demanded |
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |
+| `literature_backend` | `auto` | `auto` uses a bibliography service if the agent has one, and files if it does not; `zotero` and `files` pin it |
+| `require_vault` | `false` | `true` makes a missing Obsidian vault an error instead of falling back to plain markdown |
+| `notes_dir` | — | where the notes go when there is no vault (default: `<state home>/notes/`) |
 
 A topic can override the review interval in its own `research-map.json`
 with `review_every: {"searches": n, "turns": n}`, which the agent can set
@@ -272,6 +357,9 @@ research_mode(action="amend", project="X", claim_id="L44", strength="suggestive"
 research_mode(action="contradict", project="X", title="...", separator="...")
 research_mode(action="set_state", project="X", phase="weighing", narrative="...")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
+research_mode(action="source", project="X", source_kind="zotero",
+              source_locator="ABCD1234")
+research_mode(action="library", project="X")
 research_mode(action="validate", project="X")
 ```
 

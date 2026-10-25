@@ -73,6 +73,12 @@ _CONCLUSION_MARKERS = (
 
 # A source field that looks like a real citation rather than a placeholder.
 _SOURCE_OK = re.compile(r"(PMID|DOI|10\.\d{4,}|arxiv|et al\.?|等,|卷|页|\[\d+\])", re.I)
+
+# A literature-library reference: S1, S12, or S3:some/free text. The
+# ledger's own library is a legitimate source, and it is the only one
+# that works when there is no bibliography service at all.
+_LIB_SOURCE_OK = re.compile(r"^S\d+\b")
+
 _PLACEHOLDER = re.compile(r"^(待补|tbd|todo|n/?a|unknown|xxx|-|\.\.\.|pending)$", re.I)
 
 
@@ -156,7 +162,7 @@ def validate_claims(topic: str) -> dict[str, Any]:
                 err(cid, "missing_source", f"{kind} requires a source (PMID/DOI/paper)")
             elif _PLACEHOLDER.match(source):
                 err(cid, "placeholder_source", f"{kind} source is a placeholder: {source!r}")
-            elif not _SOURCE_OK.search(source):
+            elif not _SOURCE_OK.search(source) and not _LIB_SOURCE_OK.search(source):
                 warn(cid, "weak_source", f"source does not look like a citation: {source!r}")
 
         # --- inference obligations ---------------------------------------

@@ -1902,6 +1902,156 @@ def test_the_review_threshold_is_configurable():
     assert s3 == 5, s3
 
 
+def test_a_source_goes_into_the_literature_library():
+    """A claim needs a source, and a source is a thing that can be looked
+    up again. A bare string says "PMID 12345" and nothing else; a library
+    entry says what the source is and where it lives."""
+    m = _handler()
+    sid = "t-lib"
+    m._tool_handler(
+        {"action": "create", "project": "LibTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    out = m._tool_handler(
+        {
+            "action": "source",
+            "project": "LibTopic",
+            "source_kind": "zotero",
+            "source_locator": "ABCD1234",
+            "source_title": "A paper",
+            "source_doi": "10.1/x",
+        },
+        session_id=sid,
+    )
+    body = str(out)
+    assert "S1" in body, body
+    # A source that is already there is not added twice: two entries for
+    # the same paper make the reader do the deduplication.
+    out2 = m._tool_handler(
+        {
+            "action": "source",
+            "project": "LibTopic",
+            "source_kind": "zotero",
+            "source_locator": "ABCD1234",
+        },
+        session_id=sid,
+    )
+    assert "S1" in str(out2)
+    lib = m._tool_handler({"action": "library", "project": "LibTopic"}, session_id=sid)
+    assert lib.count("S1") >= 1
+    # The file kind is the fallback, and it has to work with no
+    # bibliography service at all.
+    out3 = m._tool_handler(
+        {
+            "action": "source",
+            "project": "LibTopic",
+            "source_kind": "file",
+            "source_locator": "/tmp/paper.pdf",
+        },
+        session_id=sid,
+    )
+    assert "S2" in str(out3), out3
+    # An unknown kind is refused rather than filed under something.
+    out4 = m._tool_handler(
+        {
+            "action": "source",
+            "project": "LibTopic",
+            "source_kind": "guess",
+            "source_locator": "x",
+        },
+        session_id=sid,
+    )
+    assert "error" in str(out4).lower(), out4
+
+
+def test_a_claim_can_cite_a_library_entry():
+    """The id is what makes the source resolvable; the entry's own form
+    is what makes the ledger readable without the library open."""
+    m = _handler()
+    sid = "t-cite"
+    m._tool_handler(
+        {"action": "create", "project": "CiteTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler(
+        {
+            "action": "source",
+            "project": "CiteTopic",
+            "source_kind": "zotero",
+            "source_locator": "K1",
+            "source_title": "The Paper",
+        },
+        session_id=sid,
+    )
+    out = m._tool_handler(
+        {
+            "action": "claim",
+            "project": "CiteTopic",
+            "claim": {
+                "kind": "observation",
+                "content": "the effect was X",
+                "source": "S1",
+            },
+        },
+        session_id=sid,
+    )
+    body = str(out)
+    assert "The Paper" in body, body
+    assert "S1" in body, body
+
+
+def test_the_question_can_be_redefined_and_the_old_one_is_kept():
+    """A project that runs long sometimes finds that the question it is
+    answering is not the question worth answering. A tool that cannot
+    record that forces the agent to stay on a bad question or to smuggle
+    the change in through the narrative, where nothing can see it."""
+    m = _handler()
+    sid = "t-redef"
+    m._tool_handler(
+        {"action": "create", "project": "RedefTopic", "core_question": "the old question"},
+        session_id=sid,
+    )
+    out = m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "RedefTopic",
+            "core_question": "the better question",
+            "question_reason": "the old one was a symptom",
+        },
+        session_id=sid,
+    )
+    assert "error" not in str(out).lower(), out
+    mp = state.read_map("RedefTopic")
+    assert mp.get("core_question") == "the better question", mp.get("core_question")
+    hist = mp.get("question_history") or []
+    assert len(hist) == 1, hist
+    assert hist[0].get("was") == "the old question", hist
+    assert "symptom" in str(hist[0].get("why") or ""), hist
+
+
+def test_an_exploration_is_recorded():
+    """Looking outside the current frame and not finding anything is a
+    result, and the project has to know it looked."""
+    m = _handler()
+    sid = "t-expl"
+    m._tool_handler(
+        {"action": "create", "project": "ExplTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "ExplTopic",
+            "exploration": "looked for a completely different mechanism, did not find it",
+        },
+        session_id=sid,
+    )
+    mp = state.read_map("ExplTopic")
+    ex = mp.get("explorations") or []
+    assert len(ex) == 1, ex
+    assert "different mechanism" in str(ex[0].get("what") or ""), ex
+
+
 def test_status_answers_about_the_topic_not_about_the_session():
     """`status` with a project means "what state is this topic in". It
     used to answer with the session's state, which is idle for any caller

@@ -157,10 +157,25 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'hypothesis' puts an untested idea on the table — proposing one is "
         "research, so it has its own action rather than being bent into a claim. "
         "ACTION 'map' updates the research map (core_question, hypotheses, tags, open_questions). "
+        "ACTION 'source' records a source in the topic's literature library and returns an id "
+        "(S1, S2...) that a claim can cite as source='S1' - use it so the source can be looked up "
+        "again, not just read. kind is 'zotero' (a bibliography service holds it; the locator is "
+        "the item key - create or find the item with the bibliography tools first, then pass the "
+        "key), 'file' (a document on disk; the locator is the path), or 'ref' (a bare DOI/PMID). "
+        "ACTION 'library' lists what the topic already has, so a source is not recorded twice. "
+        "If there is no bibliography service available, use kind='file' with the path - the "
+        "library still records it and the claim still cites it. "
         "ACTION 'set_state' says where the project stands: 'goal' (what it is trying to get at), "
         "'phase' (scoping | evidence | weighing | closing | writing - each phase calls for a "
         "different way of thinking, and the phase changes how the next turn is worked on), and "
-        "'current_task' (what is being done right now). ACTION 'review' records a global review - "
+        "'current_task' (what is being done right now). ACTION 'set_state' also takes "
+        "'core_question' to redefine the question this topic is answering, with "
+        "'question_reason' saying why - a project that runs long sometimes finds the "
+        "question is not the one worth answering, and that has to be recordable rather "
+        "than smuggled in through the narrative. It takes 'exploration' to record what "
+        "was looked for outside the current frame (a rival reading, a counterexample), "
+        "so the project knows it looked and did not find it. ACTION 'review' records a "
+        "global review - "
         "whether the work is still serving the core question, with a verdict "
         "(continue | redirect | pause) and the reason. A project can drift without any single "
         "claim being wrong, so the alignment is checked explicitly; a 'pause' verdict stops "
@@ -178,7 +193,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "enum": [
                     "on", "off", "status", "list", "create", "switch",
                     "contradict", "question", "hypothesis", "map",
-                    "set_state", "review",
+                    "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
                 ],
                 "description": "What to do.",
@@ -190,6 +205,56 @@ TOOL_SCHEMA: dict[str, Any] = {
             "core_question": {
                 "type": "string",
                 "description": "The scientific question this topic addresses. Required for create.",
+            },
+            "source_kind": {
+                "type": "string",
+                "description": (
+                    "For action 'source': what kind of source this is. "
+                    "'zotero' (a bibliography service holds it - the locator "
+                    "is the item key), 'file' (a document on disk - the "
+                    "locator is the path), 'ref' (a bare DOI or PMID with "
+                    "nothing behind it)."
+                ),
+            },
+            "source_locator": {
+                "type": "string",
+                "description": (
+                    "For action 'source': the item key, the file path, or the "
+                    "DOI/PMID that identifies the source."
+                ),
+            },
+            "source_title": {
+                "type": "string",
+                "description": "For action 'source': the title, so the entry is readable later.",
+            },
+            "source_doi": {
+                "type": "string",
+                "description": "For action 'source': the DOI, if there is one.",
+            },
+            "core_question": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': redefine the question this topic "
+                    "is answering. A project that runs long sometimes finds "
+                    "the question is not the one worth answering; the old one "
+                    "is kept with the reason."
+                ),
+            },
+            "question_reason": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': why the question is being "
+                    "redefined. Required when core_question changes."
+                ),
+            },
+            "exploration": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': what was explored outside the "
+                    "current frame - a rival reading, a counterexample, a "
+                    "different way of asking. Recorded so the project knows "
+                    "it looked, and did not find it."
+                ),
             },
             "review_every": {
                 "type": "object",
@@ -463,6 +528,33 @@ def _split_list(value: Any, sep: str = "|") -> list[str]:
     return [p.strip() for p in parts if p and str(p).strip()]
 
 
+
+def _expand_source(project: str, claim: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a library id in a claim's source into a readable citation.
+
+    A claim may cite "S3" - the id of an entry in the topic's
+    literature library. The id is what makes it resolvable, and the
+    entry's own form ("S3 Title 10.1/x [zotero:KEY]") is what makes
+    the ledger readable without the library open. A source that is
+    already a full citation is left alone.
+    """
+    src = str(claim.get("source") or "").strip()
+    if not src:
+        return claim
+    # Only a bare id, or an id followed by a note, is expanded. A string
+    # that already looks like a citation is left exactly as it is.
+    parts = src.split()
+    head = parts[0] if parts else ""
+    if not head.startswith("S") or not head[1:].isdigit():
+        return claim
+    entry = _state.library_lookup(project, head)
+    if not entry:
+        return claim
+    cited = _state.library_cite(project, head)
+    claim["source"] = (cited + " " + src[len(head):]).strip()
+    return claim
+
+
 def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
     action = str(args.get("action") or "status").strip().lower()
     project = str(args.get("project") or "").strip()
@@ -671,6 +763,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     one["premises"] = " ".join(
                         _split_list(one.get("premises"), sep=" ")
                     )
+                    one = _expand_source(project, one)
                     existing = _state.find_claim(project, one.get("content") or "")
                     if existing is not None:
                         duplicates.append(existing.get("id"))
@@ -720,7 +813,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                         f"指向 {existing.get('id')}。"
                     ),
                 })
-            row = _state.append_claim(project, claim)
+            row = _state.append_claim(project, _expand_source(project, claim))
             return ok({"recorded": row})
 
         if action == "amend":
@@ -843,10 +936,17 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             narrative = args.get("narrative")
             plan = args.get("plan")
             every = args.get("review_every")
+            core_q = args.get("core_question")
+            q_reason = args.get("question_reason")
+            exploration = args.get("exploration")
             if every is not None and not isinstance(every, dict):
                 return fail("review_every must be an object")
             if all(
-                x is None for x in (goal, phase, task, narrative, plan, every)
+                x is None
+                for x in (
+                    goal, phase, task, narrative, plan, every,
+                    core_q, exploration,
+                )
             ):
                 return fail(
                     "give at least one of: goal (what this project is trying "
@@ -855,7 +955,9 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "narrative (what we currently believe and why it changed), "
                     "plan (what happens next), review_every "
                     "({'searches': n, 'turns': n} - how much work may pile "
-                    "up before a global review)"
+                    "up before a global review), core_question (redefine the "
+                    "question - with question_reason saying why), exploration "
+                    "(what was looked for outside the current frame)"
                 )
             if phase is not None:
                 key = str(phase).strip()
@@ -873,6 +975,9 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 narrative=narrative,
                 plan=plan,
                 review_every=every,
+                core_question=core_q,
+                question_reason=q_reason,
+                exploration=exploration,
             )
             # Updating the standing is what lifts a pause: the review said
             # the work had drifted, and the agent has now said where it is
@@ -892,9 +997,69 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "narrative": m.get("narrative"),
                     "plan": m.get("plan"),
                     "review_every": m.get("review_every") or {},
+                    "core_question": m.get("core_question"),
+                    "question_changed": bool(m.get("question_history")),
+                    "explorations": len(m.get("explorations") or []),
                     "resumed": was_paused,
                 }
             )
+
+        if action == "source":
+            # A claim needs a source, and a source is a thing that can be
+            # looked up again. A bare string in the ledger says "PMID
+            # 12345" and nothing else; an entry in the topic's library
+            # says what the source is, where it lives, and whether it can
+            # be re-read.
+            #
+            # The plugin cannot call a bibliography service itself, so
+            # the agent does that part with the tools it has and reports
+            # the key here. The library is what survives, whatever the
+            # agent had available.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project}")
+            kind = str(args.get("source_kind") or "ref").strip().lower()
+            locator = str(args.get("source_locator") or "").strip()
+            if not locator:
+                return fail(
+                    "source_locator is required: the item key, the file "
+                    "path, or the DOI/PMID"
+                )
+            try:
+                entry = _state.add_source(
+                    project,
+                    kind,
+                    locator,
+                    title=str(args.get("source_title") or ""),
+                    doi=str(args.get("source_doi") or ""),
+                    note=str(args.get("note") or ""),
+                )
+            except ValueError as exc:
+                return fail(str(exc))
+            # The library entry is what a claim cites. A claim that cites
+            # a bare string is still valid, so this is not enforced - it
+            # is the better form, and the tool's answer says so.
+            return ok({
+                "source": entry,
+                "cite_as": _state.library_cite(project, entry.get("id") or ""),
+                "hint": (
+                    "cite it in a claim as source='<id>' - the id resolves "
+                    "to this entry"
+                ),
+            })
+
+        if action == "library":
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project}")
+            items = _state.read_library(project)
+            return ok({
+                "library": items,
+                "count": len(items),
+                "backend": _state.load_config().get("literature_backend", "auto"),
+            })
 
         if action == "review":
             # A recorded global review: did the work stay on the core
@@ -1835,6 +2000,15 @@ def _post_tool_call(**kwargs: Any) -> None:
             if topic and s.get("mode") == "research":
                 _state.note_topic_search(topic, tool_name)
                 _state.note_search_since_review(topic)
+        # Which literature backend this session actually has. The plugin
+        # cannot call a bibliography service, so it cannot ask whether one
+        # is there - but it can watch which tools the agent reaches for.
+        # If the agent is using a bibliography service, the topic's
+        # sources should go there; if it is not, they go to files.
+        if tool_name.startswith("mcp__zotero") or "zotero" in tool_name.lower():
+            _state.note_session_literature(session_id, "zotero")
+        elif tool_name.startswith("mcp__") and _audit.is_evidence_tool(tool_name):
+            _state.note_session_literature(session_id, "files")
         return None
     except Exception:
         return None

@@ -35,8 +35,22 @@ EVIDENCE_TOOLS = (
     "mcp__openalex__openalex_get_citation_graph",
     "mcp__openalex__openalex_resolve_name",
     "mcp__zotero__zotero_item_find_by_dois",
+    "mcp__zotero__zotero_pdf_add_and_recognize",
+    "mcp__zotero__zotero_pdf_add_and_recognize_batch",
+    "mcp__zotero__zotero_attachment_recognize_metadata",
+    "mcp__zotero__zotero_item_create",
     "web_search",
 )
+
+def is_evidence_tool(tool_name: str) -> bool:
+    """True when a tool gathers or files evidence.
+
+    The tuple is the list of exact names, and a name that starts with the
+    same prefix but is not in it is not evidence - a tool the host adds
+    later should not silently count as a search.
+    """
+    return str(tool_name or "") in EVIDENCE_TOOLS
+
 
 # The agent's own recording tool. Its presence means the agent did account for
 # something.

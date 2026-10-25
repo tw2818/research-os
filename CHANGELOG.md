@@ -7,6 +7,62 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-25
+
+Five gaps, and the same shape in all of them: the work was fine and the
+record of the work was missing.
+
+### Added
+
+- **The question can be redefined.** `set_state` takes `core_question`
+  and `question_reason`, and the old question is kept with the reason it
+  was replaced. A project that runs long sometimes finds that the
+  question it is answering is not the question worth answering, and a
+  tool that cannot record that forces the agent either to stay on a bad
+  question or to smuggle the change in through the narrative, where
+  nothing can see it.
+- **A diverging phase.** A project that only ever narrows settles into
+  the first frame it found. The new phase asks for the counterexample
+  rather than the supporting evidence, and states that what it produces
+  is a lead to chase, not a conclusion — the work goes back to
+  `evidence`. What was looked for outside the frame is recorded
+  (`exploration`), so the project knows it looked and did not find it.
+- **The topic's frame reaches the agent.** The settled questions, the
+  open ones, and the competing hypotheses the current judgement may not
+  cover were all in the state file and none of them in the injected
+  block — the block kept the evidence and lost the memory. The settled
+  questions go in ahead of the rules, because a question that is already
+  answered is work nobody should be repeating.
+- **A literature library.** A claim needs a source, and a source is a
+  thing that can be looked up again. Each topic keeps a small library
+  (`sources.json`); a claim cites an entry by id (`S1`) and the ledger
+  stores the entry's readable form, so the source resolves and the
+  ledger reads. A source already in the library is not added twice.
+- **A rendered map of the topic.** The notes were a ledger export. There
+  is now a map, written in the order a researcher wants it: what the
+  project is, where it stands, what is still open, and what the
+  judgement rests on — prose, with the claim ids inline, so every
+  statement in it can be traced back.
+- **The notes do not need Obsidian.** A missing vault is not an error:
+  the notes go to `<state home>/notes/<topic>/` as plain markdown and the
+  reader is told where they went. `require_vault: true` restores the
+  strict behaviour.
+- **The literature backend is detected, not assumed.** The plugin cannot
+  call a bibliography service, so it watches which tools the agent
+  reaches for. If the agent is filing things in Zotero, the topic's
+  sources go there; if it is not, they go to files. `literature_backend`
+  in the config pins the preference.
+
+### Changed
+
+- The Zotero filing tools — creating an item, importing a PDF — count as
+  evidence tools now, so a run that files rather than searches is
+  counted for what it did.
+- `scripts/check-injection-blocks.py` checks the block against the real
+  topics, not against a fixture with a short question in it. A long real
+  field crowds the standing out of the block, and a short fixture will
+  not show it.
+
 ## [0.2.2] — 2026-10-25
 
 The theme of this release: the agent kept doing the science and dropping

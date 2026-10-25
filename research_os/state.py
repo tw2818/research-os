@@ -75,6 +75,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "obsidian_vault": "",
     "obsidian_subdir": "ResearchOS",
     "obsidian_enabled": True,
+    # Where the notes go when there is no vault. Next to the state tree,
+    # not inside it: a rendering is not the record, and putting it
+    # inside invites someone to edit the wrong file.
+    "notes_dir": "",
     "inject_protocol": True,
     # The block carries the project's standing, the situation, the thinking
     # moves and what the phase is for. It is long because the alternative is
@@ -87,6 +91,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # a broad literature sweep is legitimate — and the point is to catch the
     # run that searches forty times and never answers.
     "searches_before_converge": 20,
+    # Which literature backend to prefer. "auto" means: use a
+    # bibliography service if the agent has one, and fall back to files
+    # when it does not. "zotero" and "files" pin it.
+    "literature_backend": "auto",
+    # Whether a missing Obsidian vault is an error. It is not by
+    # default: the notes fall back to plain markdown files, and a
+    # renderer that refuses to render is a renderer nobody uses.
+    "require_vault": False,
 }
 
 
@@ -260,6 +272,18 @@ MAP_PHASE = "phase"
 MAP_TASK = "current_task"
 MAP_NARRATIVE = "narrative"
 MAP_PLAN = "plan"
+# The core question can be redefined, and the redefinitions are kept.
+# A project that runs long sometimes discovers that the question it is
+# answering is not the question worth answering. If the tool cannot
+# record that, the agent either stays on a bad question or smuggles the
+# change in through the narrative, where nothing can see it.
+MAP_CORE_QUESTION = "core_question"
+MAP_QUESTION_HISTORY = "question_history"
+# How much open exploration the topic has had since the last narrowing.
+# See "exploration" in the review: a project that only ever narrows
+# settles into the first frame it found.
+MAP_EXPLORATIONS = "explorations"
+MAP_LAST_EXPLORED = "last_explored"
 
 
 def read_goal(topic: str) -> str:
@@ -295,6 +319,9 @@ def write_state(
     narrative: str | None = None,
     plan: str | None = None,
     review_every: dict[str, int] | None = None,
+    core_question: str | None = None,
+    question_reason: str | None = None,
+    exploration: str | None = None,
 ) -> dict[str, Any]:
     """Update the topic's standing, keeping the fields not being changed.
 
@@ -324,6 +351,35 @@ def write_state(
             if v:
                 over[k] = max(1, int(v))
         m["review_every"] = over
+    if core_question is not None:
+        new_q = str(core_question).strip()
+        old_q = str(m.get(MAP_CORE_QUESTION) or "").strip()
+        if new_q and new_q != old_q:
+            # The old question is kept, with the reason it was replaced.
+            # A redefined question without a record of the old one is a
+            # question that quietly changed, and the next session cannot
+            # tell whether the work answers what it used to answer.
+            hist = list(m.get(MAP_QUESTION_HISTORY) or [])
+            hist.append({
+                "was": old_q,
+                "now": new_q,
+                "why": str(question_reason or "").strip(),
+                "at": now(),
+            })
+            m[MAP_QUESTION_HISTORY] = hist
+            m[MAP_CORE_QUESTION] = new_q
+            # The work collected under the old question does not answer
+            # the new one, so it is marked rather than deleted. A claim
+            # that was an answer to something else is still a claim, and
+            # the reader has to know which.
+            m["question_redefined_at"] = now()
+    if exploration is not None:
+        ex = str(exploration).strip()
+        if ex:
+            log = list(m.get(MAP_EXPLORATIONS) or [])
+            log.append({"what": ex, "at": now()})
+            m[MAP_EXPLORATIONS] = log
+            m[MAP_LAST_EXPLORED] = now()
     write_map(topic, m)
     return m
 
@@ -477,6 +533,132 @@ def read_contradictions(topic: str) -> dict[str, Any]:
 def write_contradictions(topic: str, data: dict[str, Any]) -> None:
     data["updated_at"] = now()
     _write_json(topic_dir(topic) / "contradictions.json", data)
+
+
+# --------------------------------------------------------------------------
+# the literature library
+# --------------------------------------------------------------------------
+#
+# A claim needs a source, and a source is a thing that can be looked up
+# again. The source used to be free text, which is enough for a PMID and
+# useless for anything else: a Zotero item key says nothing to a reader
+# six months later, and a file path says nothing to a collaborator.
+#
+# So a topic keeps a small library, and a claim refers to an entry in it.
+# The entry says what kind of source it is, where it lives, and enough to
+# find it again without the agent.
+#
+# Three kinds, because the fallback has to be a real fallback:
+#   zotero - a bibliography service holds it, the locator is the item key
+#   file   - a document on disk, the locator is the path
+#   ref    - a bare identifier (DOI or PMID) with nothing behind it
+#
+# The kind is not decoration. It is what tells the reader whether the
+# source can be re-read, and it is what lets the system degrade: with
+# no Zotero, entries are files; with no vault, the rendered notes are
+# plain files.
+LIBRARY_FILE = "sources.json"
+
+_LIBRARY_DEFAULT = {
+    "kind": "ref",
+    "locator": "",
+    "title": "",
+    "doi": "",
+    "path": "",
+    "note": "",
+}
+
+
+def library_path(topic: str) -> Path:
+    return topic_dir(topic) / LIBRARY_FILE
+
+
+def read_library(topic: str) -> list[dict[str, Any]]:
+    """The topic's literature library, in the order it was added."""
+    data = _read_json(library_path(topic), {})
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        entry = dict(_LIBRARY_DEFAULT)
+        # Keep everything the entry carries, not just the known fields:
+        # added_at and any field a later version writes have to survive
+        # the read, or a re-read of the library is lossy.
+        entry.update({k: v for k, v in it.items() if v is not None})
+        entry["id"] = str(it.get("id") or "")
+        out.append(entry)
+    return out
+
+
+def write_library(topic: str, items: list[dict[str, Any]]) -> None:
+    _write_json(library_path(topic), {"topic": topic, "items": items, "updated_at": now()})
+
+
+def add_source(topic: str, kind: str, locator: str, **fields: Any) -> dict[str, Any]:
+    """Add an entry to the library, or return the existing one.
+
+    A source that is already in the library is not added twice: two
+    entries for the same paper make the reader do the deduplication, and
+    the reader is the one the whole system exists to help.
+    """
+    kind = str(kind or "ref").strip().lower()
+    if kind not in ("zotero", "file", "ref"):
+        raise ValueError(f"unknown source kind {kind!r}: use zotero | file | ref")
+    locator = str(locator or "").strip()
+    if not locator:
+        raise ValueError("a source needs a locator: an item key, a path, or a DOI/PMID")
+    items = read_library(topic)
+    for it in items:
+        if it.get("kind") == kind and str(it.get("locator") or "") == locator:
+            return it
+    nxt = 1
+    used = {it.get("id") for it in items}
+    while f"S{nxt}" in used:
+        nxt += 1
+    entry = dict(_LIBRARY_DEFAULT)
+    entry["id"] = f"S{nxt}"
+    entry["kind"] = kind
+    entry["locator"] = locator
+    for k, v in fields.items():
+        if k in _LIBRARY_DEFAULT and v:
+            entry[k] = str(v)
+    entry["added_at"] = now()
+    items.append(entry)
+    write_library(topic, items)
+    return entry
+
+
+def library_lookup(topic: str, ref: str) -> dict[str, Any] | None:
+    """Find a library entry by id, or by locator."""
+    ref = str(ref or "").strip()
+    if not ref:
+        return None
+    items = read_library(topic)
+    for it in items:
+        if it.get("id") == ref:
+            return it
+    for it in items:
+        if str(it.get("locator") or "") == ref:
+            return it
+    return None
+
+
+def library_cite(topic: str, ref: str) -> str:
+    """A readable citation for a library entry, for the ledger's source."""
+    it = library_lookup(topic, ref)
+    if not it:
+        return str(ref or "")
+    bits = [it.get("id") or ""]
+    if it.get("title"):
+        bits.append(str(it["title"]))
+    if it.get("doi"):
+        bits.append(str(it["doi"]))
+    if it.get("locator") and it.get("kind") != "ref":
+        bits.append(f"[{it['kind']}:{it['locator']}]")
+    return " ".join(b for b in bits if b)
 
 
 # --------------------------------------------------------------------------
@@ -726,6 +908,31 @@ def set_claim_status(topic: str, claim_id: str, status: str) -> dict[str, str]:
 def session_path(session_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "unknown")
     return SESSIONS_DIR / f"{safe}.json"
+
+
+def note_session_literature(session_id: str, backend: str) -> None:
+    """Record which literature backend this session has available.
+
+    The plugin cannot call a bibliography service, so it cannot ask
+    whether one is there. It can watch which tools the agent reaches
+    for, and that is the same question answered a moment later: if the
+    agent is filing things in Zotero, the topic's sources go there; if it
+    is not, they go to files.
+    """
+    backend = str(backend or "").strip().lower()
+    if backend not in ("zotero", "files"):
+        return
+    d = _read_json(session_path(session_id), {})
+    if d.get("literature_backend") == backend:
+        return
+    d["literature_backend"] = backend
+    _write_json(session_path(session_id), d)
+
+
+def session_literature(session_id: str) -> str:
+    """The literature backend this session has: zotero, files, or unknown."""
+    d = _read_json(session_path(session_id), {})
+    return str(d.get("literature_backend") or "").strip().lower()
 
 
 def read_session(session_id: str) -> dict[str, Any]:

@@ -30,10 +30,21 @@ except ImportError:
 # The phases of a research project, and what thinking each one calls for.
 #
 # A project moves through these, and the way of thinking changes with them.
-# Scoping a question, gathering evidence, weighing rival explanations, and
-# writing up are different jobs, and an agent that uses the same method for
-# all four will gather evidence while it should be deciding what to ask, or
-# write while it should be arguing with itself.
+# Scoping a question, opening the frame up to rival readings, gathering
+# evidence, weighing rival explanations, and writing up are different jobs,
+# and an agent that uses the same method for all of them will gather evidence
+# while it should be deciding what to ask, or write while it should be
+# arguing with itself.
+#
+# The diverging phase is the one that stops the list from being all
+# narrowing. Everything else tightens the frame; nothing in it ever asks
+# whether the frame is the right one. An agent that only ever narrows
+# settles into the first frame it found and then defends it, and the
+# narrowing looks like progress the whole way. So the frame gets a phase of
+# its own, and what that phase produces is not a conclusion but a lead:
+# another way of asking, and the observation that would tell the two
+# readings apart. The lead goes back to evidence to be checked, not
+# straight to closing.
 #
 # The phase is the agent's own: it moves the phase when the work moves, and
 # the switch is a tool call, not a guess made by the hook.
@@ -51,6 +62,21 @@ PHASES: dict[str, dict[str, str]] = {
         "gate": (
             "这一阶段不要急着找证据。先把问题问准——"
             "如果用户这轮给的是一个具体任务，先问它服务的是哪个问法。"
+        ),
+    },
+    "diverging": {
+        "name": "放开框架",
+        "thinking": (
+            "这轮在放开框架。主动找当前框架的反例：什么观察会推翻现在的说法？"
+            "有没有完全不同的问法？哪些材料是被当前框架当成理所当然、但其实没验证过的？"
+            "别急着替现在的说法找补——反例都被解释掉，可能是框架太松，不是证据太硬。"
+        ),
+        "output": (
+            "给出候选的新框架或新问法，以及能把它和当前框架分开的一个观察。"
+        ),
+        "gate": (
+            "这一阶段不收口、不下结论、不改问题。"
+            "发散出来的是值得去查的线索，不是结论——查完回 evidence 阶段去查。"
         ),
     },
     "evidence": {
@@ -268,6 +294,88 @@ def _situation(topic: str) -> list[str]:
     return lines
 
 
+def _qtext(q: Any) -> str:
+    """The text of a question, however the map happens to store it.
+
+    A closed question is stored with its answer - the question is what
+    the agent needs to see, because the answer is what it would otherwise
+    go and look up again.
+    """
+    if isinstance(q, dict):
+        for key in ("question", "q", "text", "title", "content"):
+            v = str(q.get(key) or "").strip()
+            if v:
+                return v
+        return ""
+    return str(q or "").strip()
+
+
+def _frame(topic: str, m: dict[str, Any] | None = None) -> list[str]:
+    """What the project has already settled, and what it has not touched.
+
+    The injection used to carry the standing and the current situation,
+    and the rest of the map was invisible. The agent knew which
+    explanation was ahead and what evidence would separate it, and knew
+    nothing about the questions the project had already closed or about
+    the hypotheses it had never come back to. So it did the work again
+    for questions that were already answered, and it narrowed onto the one
+    hypothesis in front of it without noticing that the map still held
+    six others it had not touched.
+
+    These lines are the project's frame. They are deliberately short: a
+    frame that lists everything is a file, not a line. What belongs here
+    is what changes what the agent does next - a question that is already
+    answered (do not go looking for it again), the questions that are
+    still open (that is where the work is), and how wide the space of
+    competing hypotheses still is (so the judgment does not quietly
+    become narrower than the question).
+
+    None of this is a task for the agent. It is a picture of the project,
+    and the project keeps working whatever the agent does with it.
+    """
+    m = m if m is not None else read_map(topic)
+    lines: list[str] = []
+
+    # The questions that are closed. This is the line that saves the
+    # most work: an agent that does not know a question is settled will
+    # go and settle it again, and the search is the expensive part.
+    settled = [t for t in (_qtext(q) for q in (m.get("resolved_questions") or [])) if t]
+    if settled:
+        items = "；".join(_short(q, 55) for q in settled[:2])
+        more = f"（另有 {len(settled) - 2} 条）" if len(settled) > 2 else ""
+        lines.append(f"已解问题（不用再查）：{items}{more}")
+
+    # The questions still open. Two of them, and how many are left, so
+    # the agent can tell whether it is looking at the whole list or at
+    # the top of it.
+    open_q = [t for t in (str(q).strip() for q in (m.get("open_questions") or [])) if t]
+    if open_q:
+        items = " ｜ ".join(_short(q, 38) for q in open_q[:2])
+        more = f"（另有 {len(open_q) - 2} 条）" if len(open_q) > 2 else ""
+        lines.append(f"待解问题（还没解）：{items}{more}")
+
+    # The hypotheses the project is holding. The count is the point: the
+    # current judgment usually weighs one or two of them, and the agent
+    # has no other way of noticing that the map still holds the rest.
+    #
+    # Which ones are untouched cannot be worked out from the state - a
+    # hypothesis has no status field, and matching the map's list against
+    # the ledger's wording is a guess. So the line states what is
+    # certain, the width of the space, and leaves the comparison to the
+    # agent that can read the map.
+    hyp = [t for t in (str(h).strip() for h in (m.get("hypotheses") or [])) if t]
+    if hyp:
+        if not str(m.get("narrative") or "").strip():
+            lines.append(
+                f"未处理的假设：地图上 {len(hyp)} 个竞争假设，都还没写进当前判断"
+            )
+        else:
+            lines.append(
+                f"未处理的假设：地图上 {len(hyp)} 个竞争假设，当前判断未必都覆盖过"
+            )
+    return lines
+
+
 def _short(text: Any, limit: int = 110) -> str:
     """Trim a long field to its first clause.
 
@@ -378,7 +486,6 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         return f"[Research OS · {topic}]\n该课题还没有 research-map.json，先读它再回答。"
 
     hyp = [h for h in (m.get("hypotheses") or []) if str(h).strip()]
-    open_q = [q for q in (m.get("open_questions") or []) if str(q).strip()]
 
     lines = [f"[Research OS · {topic}]"]
     lines.append(f"核心问题：{m.get('core_question', '')}")
@@ -398,6 +505,11 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         gate = phase_gate(phase)
         if gate:
             lines.append(f"这轮不要做：{gate}")
+    # The frame comes next: what the project has already settled and what
+    # it has not. It is the part of the map the agent cannot see by
+    # looking at the question in front of it, and it is what stops the
+    # same work being done twice.
+    lines.extend(_frame(topic, m))
     # The situation comes next: the state of play, not a list of things
     # someone wrote down once.
     lines.extend(_situation(topic))
@@ -405,8 +517,6 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         ln.startswith(("当前最佳解释", "候选解释", "受质疑", "能分开")) for ln in lines
     ) and hyp:
         lines.append("竞争解释：" + " ｜ ".join(hyp))
-    if open_q:
-        lines.append("待解问题：" + " ｜ ".join(open_q[:2]))
     # The alignment check: the drift that no local check catches.
     lines.extend(_alignment(topic))
     # The thinking moves come before the claim rules. A mode that leads with
@@ -453,7 +563,11 @@ _KEEP_PREFIXES = (
     '受质疑的解释',
     '能分开它的证据',
     '竞争解释：',
-    '待解问题：',
+    # The frame: the questions already settled, the ones still open, and
+    # the hypotheses the map is still holding.
+    '已解问题（不用再查）：',
+    '待解问题（还没解）：',
+    '未处理的假设：',
     '如果用户这轮',
     '（以上仅属于',
 )
@@ -504,12 +618,12 @@ def _truncate(block: str, cap: int) -> str:
     priority = re.compile(
         r"^(" + "|".join(re.escape(x) for x in _KEEP_PREFIXES) + r")"
     )
-    # Two tiers. The first tier is what the turn is for - the standing,
+    # Three tiers. The first tier is what the turn is for - the standing,
     # the rules, the tool call. The second tier is the situation: the
-    # competing explanations, the evidence that separates them, the open
-    # questions. The situation is real context, but it is also in the
-    # topic file, and it is long - four lines of it took more room than
-    # the rules and the tool call together.
+    # competing explanations, the evidence that separates them. The
+    # situation is real context, but it is also in the topic file, and it
+    # is long - four lines of it took more room than the rules and the
+    # tool call together.
     #
     # A block that kept the situation and lost the tool call was a
     # research session that read well and recorded nothing.
@@ -520,24 +634,45 @@ def _truncate(block: str, cap: int) -> str:
     )
     keep_second = re.compile(
         r"^(对齐检查|当前最佳解释|候选解释|受质疑的解释|"
-        r"能分开它的证据|竞争解释：|待解问题：)"
+        r"能分开它的证据|竞争解释：)"
     )
+    # The questions the project has already answered. They sit with the
+    # standing, above the rules, because an agent that does not know a
+    # question is settled will go and settle it again, and the search is
+    # the expensive part. Repeating that work costs more than a few
+    # characters of rules.
+    keep_settled = re.compile(r"^(已解问题（不用再查）：)")
+    # The rest of the frame: the questions still open, and the hypotheses
+    # the map is still holding. Below the rules - the rules are how to
+    # work, and the frame is what to work on - and above the situation,
+    # which is context the topic file already holds.
+    keep_third = re.compile(r"^(待解问题（还没解）：|未处理的假设：)")
 
     kept: list[str] = []
     used = 0
     lines = block.split("\n")
     second: list[str] = []
+    third: list[str] = []
+    settled: list[str] = []
     for i, line in enumerate(lines):
         if any(line.startswith(b.split("\n")[0][:10]) for b in blocks):
             continue
         tier2 = keep_second.match(line)
-        if not keep_first.match(line) and not tier2:
+        tier3 = keep_third.match(line)
+        tier_settled = keep_settled.match(line)
+        if tier2:
+            second.append(clip(line))
+            continue
+        if tier3:
+            third.append(clip(line))
+            continue
+        if tier_settled:
+            settled.append(clip(line))
+            continue
+        if not keep_first.match(line):
             continue
         line = clip(line)
         cost = len(line) + 1
-        if tier2:
-            second.append(line)
-            continue
         if used + cost > cap:
             continue
         kept.append(line)
@@ -554,6 +689,18 @@ def _truncate(block: str, cap: int) -> str:
                     kept.append(nxt)
                     used += cost2
 
+    # The questions already settled go in with the standing, before the
+    # rules. This is the one place where the frame outranks the way of
+    # thinking, and it is deliberate: the value of the rules is that the
+    # turn does research rather than bookkeeping, and the value of a
+    # settled question is that the turn does not do it twice.
+    for line in settled:
+        cost = len(line) + 1
+        if used + cost > cap:
+            continue
+        kept.append(line)
+        used += cost
+
     # The rules go in as whole blocks. A half-list of moves is worse than
     # no list: the agent reads the heading of a set and none of the set.
     # So they are never cut - they are either in or not.
@@ -565,11 +712,21 @@ def _truncate(block: str, cap: int) -> str:
     # that fits.
     tool_cost = len(tool_line) + 1
     rules_cost = sum(len(b) + 1 for b in blocks)
+    think_cost = len(blocks[0]) + 1
 
     if used + rules_cost <= cap:
         for b in blocks:
             kept.append(b)
             used += len(b) + 1
+    elif used + think_cost + tool_cost <= cap:
+        # The moves stay and the demand goes. The demand block says what
+        # a turn has to produce, and the tool call says the same thing
+        # about recording it; the moves are the part that cannot be
+        # restated in one line, so they are the part that stays.
+        kept.append(blocks[0])
+        used += think_cost
+        kept.append(tool_line)
+        used += tool_cost
     elif used + tool_cost <= cap:
         kept.append(tool_line)
         used += tool_cost
@@ -585,6 +742,16 @@ def _truncate(block: str, cap: int) -> str:
         if used + tool_cost <= cap:
             kept.append(tool_line)
             used += tool_cost
+
+    # The frame takes what is left after the rules: what is still open,
+    # and how wide the space of hypotheses still is. It is worth more
+    # than the situation, which is context the topic file already holds.
+    for line in third:
+        cost = len(line) + 1
+        if used + cost > cap:
+            continue
+        kept.append(line)
+        used += cost
 
     # The situation takes what is left. It is context, and it is in the
     # topic file, so it is the first thing to go when the block is tight.

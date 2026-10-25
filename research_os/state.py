@@ -1481,3 +1481,80 @@ def previous_turn_activity(session_id: str, current_turn_id: str = "") -> dict[s
         "ledger": int(best_value.get("ledger") or 0),
         "tools": list(best_value.get("tools") or []),
     }
+
+
+# --------------------------------------------------------------------------
+# the protocol: the plan, frozen before the searching starts
+# --------------------------------------------------------------------------
+#
+# Every synthesis in this literature sets its inclusion criteria, its primary
+# outcome and its analysis before it looks at a record. Research OS had no
+# place to put that: the phases went from framing straight to gathering, so a
+# run could search for hours and only then discover that the quantity it was
+# collecting had never been defined. The protocol is where that is decided,
+# and `locked` is what makes it a commitment rather than a draft.
+
+PROTOCOL_FILE = "protocol.json"
+
+PROTOCOL_FIELDS = (
+    "estimand", "inclusion", "exclusion", "primary_outcome",
+    "falsifier", "zotero_collection", "zotero_query", "note",
+)
+
+
+def protocol_path(topic: str) -> Path:
+    return topic_dir(topic) / PROTOCOL_FILE
+
+
+def read_protocol(topic: str) -> dict[str, Any]:
+    return _read_json(protocol_path(topic), {})
+
+
+def write_protocol(topic: str, data: dict[str, Any]) -> None:
+    _write_json(protocol_path(topic), data)
+
+
+def protocol_locked(topic: str) -> bool:
+    """Whether the plan was frozen. An unlocked protocol is a draft: it does
+    not gate anything, because a plan written after the data arrived is a
+    description of the data."""
+    return bool(read_protocol(topic).get("locked"))
+
+
+def protocol_missing_fields(topic: str) -> list[str]:
+    """What still has to be said before the plan can be frozen."""
+    p = read_protocol(topic)
+    missing = []
+    for field in ("estimand", "inclusion", "falsifier"):
+        value = p.get(field)
+        if isinstance(value, list):
+            ok = any(str(x).strip() for x in value)
+        else:
+            ok = bool(str(value or "").strip())
+        if not ok:
+            missing.append(field)
+    return missing
+
+
+def lock_protocol(topic: str, *, locked: bool = True, reason: str = "") -> dict[str, Any]:
+    """Freeze the plan, or say on the record why it was unfrozen.
+
+    Unfreezing keeps the reason and the previous contents in `history`: a plan
+    changed after the data arrived has to be visible as a change, otherwise
+    the freeze means nothing.
+    """
+    p = read_protocol(topic)
+    history = list(p.get("history") or [])
+    entry: dict[str, Any] = {"at": now(), "locked": bool(locked)}
+    if reason:
+        entry["reason"] = str(reason)
+    if not locked:
+        entry["previous"] = {
+            k: p.get(k) for k in PROTOCOL_FIELDS if p.get(k)
+        }
+    history.append(entry)
+    p["history"] = history[-20:]
+    p["locked"] = bool(locked)
+    p["locked_at"] = now() if locked else None
+    write_protocol(topic, p)
+    return p

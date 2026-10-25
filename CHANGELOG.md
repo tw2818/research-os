@@ -54,6 +54,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.7.0] — 2026-10-25
+
+- **The plan is frozen before the searching starts.** The phases went from
+  framing straight to gathering, so a run could search for hours and only then
+  discover that the quantity it was collecting had never been defined — which
+  is what happened here: nine count queries before anyone asked whether the
+  short band and the long band were even the same estimand. `action='protocol'`
+  records the estimand, the inclusion and exclusion criteria, the primary
+  outcome, what would falsify the claim, and the Zotero collection the study
+  searches and files against.
+- **A search in `evidence` or `weighing` is refused until the plan is frozen.**
+  `scoping` and `diverging` are exempt — exploring is what they are for — and
+  `closing` and `writing` search to verify a citation, so a gate there would
+  block the work it exists to protect. `require_protocol: false` turns it off.
+- **Changing a frozen plan costs a reason.** `unfreeze_reason` unlocks it and
+  the values being replaced are kept in `history`: a plan changed after the
+  data arrived has to be visible as a change, or the freeze means nothing.
+- **The plan renders into the vault** as `00-研究方案.md`, ahead of the ledger,
+  because the ledger is only evidence if something was fixed in advance to
+  judge it against. In Obsidian a Zotero key becomes a
+  `zotero://select/library/collections/<key>` link; a collection name is
+  printed as a name, because a link that goes nowhere is worse than a name.
+
 ## [0.6.3] — 2026-10-25
 
 - **The status moved out of the answer and onto the stage change.** A footer on

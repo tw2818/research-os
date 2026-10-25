@@ -123,6 +123,7 @@ _SETTLED_STATUSES = ("verified", "derived", "established")
 
 # The file names. The map comes first because it is the page a person
 # opens; the other three are the record it points at.
+PROTOCOL_FILE = "00-研究方案.md"
 MAP_FILE = "00-课题地图.md"
 VIEW_FILE = "00-当前认知.md"
 LEDGER_FILE = "01-证据账本.md"
@@ -795,6 +796,98 @@ def _render_map(topic: str, data: dict, *, obsidian: bool) -> str:
 # --------------------------------------------------------------------------
 # the ledger pages
 # --------------------------------------------------------------------------
+def _zotero_link(value: str) -> str:
+    """A Zotero locator as something Obsidian can hand to Zotero.
+
+    A Zotero key is eight characters of alphanumerics; anything else is a
+    collection name typed by a person, which Zotero cannot open from a link.
+    The name is still printed - a link that silently goes nowhere is worse
+    than a name that is honest about being a name.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if 6 <= len(text) <= 12 and text.isalnum():
+        return f"[{text}](zotero://select/library/collections/{text})"
+    return text
+
+
+def _render_protocol(topic: str, proto: dict, *, obsidian: bool) -> str:
+    """The plan, on a page of its own.
+
+    It comes before the ledger on purpose: the ledger is only evidence if
+    something was fixed in advance to judge it against. A protocol that was
+    never frozen says so at the top, because a plan written after the data
+    arrived is a description of the data.
+    """
+    lines: list[str] = [f"# 研究方案 · {topic}", ""]
+    locked = bool(proto.get("locked"))
+    if not proto:
+        lines += [
+            "还没有写方案。",
+            "",
+            "一个还没有冻结方案的课题，在 evidence / weighing 阶段的检索会被拒——"
+            "先捞材料再定标准，捞到的每一条都会看起来有用。",
+            "",
+            "用 `research_mode(action='protocol', …)` 写下估计量、纳入标准和否证条件，"
+            "再 `freeze=true` 冻结。",
+            "",
+        ]
+        return "\n".join(lines)
+
+    if locked:
+        when = _fmt_ts(proto.get("locked_at"))
+        lines += [f"**已冻结**{(' · ' + when) if when else ''}。改它需要理由，旧内容留痕。", ""]
+    else:
+        lines += ["**草稿，未冻结。** 冻结之前不能开始系统性检索。", ""]
+
+    estimand = str(proto.get("estimand") or "").strip()
+    if estimand:
+        lines += ["## 估计量", "", estimand, ""]
+
+    outcome = str(proto.get("primary_outcome") or "").strip()
+    if outcome:
+        lines += ["## 主结局", "", outcome, ""]
+
+    for field, label in (("inclusion", "纳入标准"), ("exclusion", "排除标准")):
+        value = proto.get(field) or []
+        if isinstance(value, str):
+            value = [value]
+        value = [str(x).strip() for x in value if str(x).strip()]
+        if value:
+            lines += [f"## {label}", ""] + [f"- {x}" for x in value] + [""]
+
+    falsifier = str(proto.get("falsifier") or "").strip()
+    if falsifier:
+        lines += ["## 什么算推翻", "", falsifier, ""]
+
+    collection = str(proto.get("zotero_collection") or "").strip()
+    query = str(proto.get("zotero_query") or "").strip()
+    if collection or query:
+        lines += ["## 文献库入口", ""]
+        if collection:
+            link = _zotero_link(collection) if obsidian else collection
+            lines.append(f"- 集合：{link}")
+        if query:
+            lines.append(f"- 建库用的检索式：`{query}`")
+        lines.append("")
+
+    note = str(proto.get("note") or "").strip()
+    if note:
+        lines += ["## 备注", "", note, ""]
+
+    history = [h for h in (proto.get("history") or []) if isinstance(h, dict)]
+    if history:
+        lines += ["## 冻结与解冻记录", ""]
+        for h in history[-10:]:
+            when = _fmt_ts(h.get("at"))
+            what = "冻结" if h.get("locked") else "解冻"
+            reason = str(h.get("reason") or "").strip()
+            lines.append(f"- {when} {what}" + (f"：{reason}" if reason else ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
 def render_topic(
     topic: str,
     out_dir: Path,
@@ -838,6 +931,12 @@ def render_topic(
         ),
     )
     written.append(p)
+    # The plan comes next, before the ledger: the ledger is only evidence if
+    # something was fixed in advance to judge it against.
+    proto = _safe(lambda: state.read_protocol(topic), {})
+    p = out_dir / PROTOCOL_FILE
+    _w(p, _render_protocol(topic, proto, obsidian=obsidian))
+    written.append(p)
     if map_only:
         return written
 
@@ -856,7 +955,11 @@ def render_topic(
         lines += [f"课题标识：`{topic}`", ""]
     # A pointer to the map, so the reader who opened the ledger knows there
     # is a page that says what the project knows.
-    lines += [f"课题地图：{_note_link(obsidian, MAP_FILE[:-3])}", ""]
+    lines += [
+        f"课题地图：{_note_link(obsidian, MAP_FILE[:-3])} · "
+        f"研究方案：{_note_link(obsidian, PROTOCOL_FILE[:-3])}",
+        "",
+    ]
 
     hyp = [h for h in (m.get("hypotheses") or []) if str(h).strip()]
     open_q = [q for q in (m.get("open_questions") or []) if str(q).strip()]

@@ -164,6 +164,13 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'library' lists what the topic already has, so a source is not recorded twice. "
         "If there is no bibliography service available, use kind='file' with the path - the "
         "library still records it and the claim still cites it. "
+        "ACTION 'protocol' writes and freezes the plan: estimand (the quantity actually "
+        "being estimated - not the question), inclusion / exclusion (separated by '|'), "
+        "primary_outcome, falsifier (what result would show the claim wrong), and the "
+        "Zotero collection the study searches and files against. freeze=true locks it, and "
+        "from then on a literature search in the evidence or weighing phase is refused "
+        "until the plan is frozen. Changing a frozen plan needs unfreeze_reason, and the "
+        "previous contents are kept in its history. "
         "ACTION 'set_state' says where the project stands: 'goal' (what it is trying to get at), "
         "'phase' (scoping | diverging | evidence | weighing | closing | writing - each phase calls for a "
         "different way of thinking, and the phase changes how the next turn is worked on), and "
@@ -194,6 +201,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "contradict", "question", "hypothesis", "map",
                     "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
+                    "protocol",
                 ],
                 "description": "What to do.",
             },
@@ -237,6 +245,68 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "is answering. A project that runs long sometimes finds "
                     "the question is not the one worth answering; the old one "
                     "is kept with the reason."
+                ),
+            },
+            "estimand": {
+                "type": "string",
+                "description": (
+                    "For action 'protocol': the quantity this study actually "
+                    "estimates, in one sentence. Not the question - the "
+                    "quantity. 'Patient-control difference in cognitive "
+                    "change' and 'within-patient change from baseline' are "
+                    "different estimands and give different answers."
+                ),
+            },
+            "inclusion": {
+                "type": "string",
+                "description": (
+                    "For action 'protocol': what qualifies a study, separated "
+                    "by '|'. Written before the searching starts, because a "
+                    "criterion written afterwards describes what was found."
+                ),
+            },
+            "exclusion": {
+                "type": "string",
+                "description": "For action 'protocol': what disqualifies a study, separated by '|'.",
+            },
+            "primary_outcome": {
+                "type": "string",
+                "description": "For action 'protocol': the one measure the decision rests on.",
+            },
+            "falsifier": {
+                "type": "string",
+                "description": (
+                    "For action 'protocol': what result would show the claim "
+                    "wrong. A plan without this is a direction, not a test."
+                ),
+            },
+            "zotero_collection": {
+                "type": "string",
+                "description": (
+                    "For action 'protocol': the Zotero collection this study "
+                    "searches and files against (name or key). Recorded in the "
+                    "protocol and rendered into the vault, so the library and "
+                    "the plan name the same corner of the library."
+                ),
+            },
+            "zotero_query": {
+                "type": "string",
+                "description": "For action 'protocol': the saved search / query the collection is built from.",
+            },
+            "freeze": {
+                "type": "boolean",
+                "description": (
+                    "For action 'protocol': lock the plan so gathering can "
+                    "start. Refused while estimand, inclusion or falsifier is "
+                    "missing."
+                ),
+            },
+            "unfreeze_reason": {
+                "type": "string",
+                "description": (
+                    "For action 'protocol': why a frozen plan is being "
+                    "changed. Required to edit a frozen protocol; the previous "
+                    "contents are kept in its history."
                 ),
             },
             "question_reason": {
@@ -704,6 +774,30 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
     def fail(msg: str) -> str:
         return json.dumps({"error": msg}, ensure_ascii=False)
 
+    def report_protocol(topic_name: str, proto: dict[str, Any]) -> str:
+        """What the plan says and whether it is a commitment yet."""
+        locked = bool(proto.get("locked"))
+        missing = _state.protocol_missing_fields(topic_name)
+        payload: dict[str, Any] = {
+            "topic": topic_name,
+            "protocol": dict(proto),
+            "locked": locked,
+        }
+        if locked:
+            payload["locked_at"] = proto.get("locked_at")
+            payload["next"] = (
+                "方案已冻结：evidence / weighing 阶段可以检索了。搜到的东西记进账本；"
+                "方案本身要改，先 unfreeze_reason，改什么为什么都会留痕。"
+            )
+        else:
+            payload["missing_before_freeze"] = missing
+            payload["next"] = (
+                "方案还是草稿。"
+                + (("补齐 " + "、".join(missing) + " 之后") if missing else "")
+                + "用 freeze=true 冻结；冻结之前，evidence / weighing 阶段的检索会被拒。"
+            )
+        return ok(payload)
+
     try:
         if action == "status":
             s = _state.read_session(session_id)
@@ -1086,6 +1180,63 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     "closed": closed or None,
                 }
             )
+
+        if action == "protocol":
+            # The plan, frozen before the searching starts. Every synthesis in
+            # this literature fixes its inclusion criteria, its primary
+            # outcome and its analysis before it looks at a record; Research
+            # OS went straight from framing to gathering, so a run could
+            # search for hours and only then find that the quantity it was
+            # collecting had never been defined. `freeze` is what makes this a
+            # commitment rather than a note, and the search guard reads it.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            current = _state.read_protocol(project)
+            changes: dict[str, Any] = {}
+            for field in _state.PROTOCOL_FIELDS:
+                if field not in args or args.get(field) is None:
+                    continue
+                value = args.get(field)
+                if field in ("inclusion", "exclusion") and isinstance(value, str):
+                    value = [
+                        x.strip()
+                        for x in value.replace("\n", "|").split("|")
+                        if x.strip()
+                    ]
+                if value != current.get(field):
+                    changes[field] = value
+            freeze = bool(args.get("freeze"))
+            reason = str(args.get("unfreeze_reason") or "").strip()
+            locked = bool(current.get("locked"))
+            if not changes and not freeze and not reason:
+                return report_protocol(project, current)   # 'show' is the default
+            if locked and (changes or freeze) and not reason:
+                return fail(
+                    f"「{project}」的方案已经冻结了。要改它，先给 unfreeze_reason："
+                    f"改什么、为什么——解冻会留下旧内容和理由。\n"
+                    f"冻结的意义就在于：数据到手之后改方案，得看得见。"
+                )
+            if locked and reason:
+                # Unfreeze first, so the history records the values that are
+                # being replaced before the new ones land on top of them.
+                _state.lock_protocol(project, locked=False, reason=reason)
+            latest = _state.read_protocol(project)
+            if changes:
+                latest.update(changes)
+                _state.write_protocol(project, latest)
+            if freeze:
+                missing = _state.protocol_missing_fields(project)
+                if missing:
+                    names = {"estimand": "估计量（estimated quantity）", "inclusion": "纳入标准",
+                             "falsifier": "否证条件（什么结果会推翻它）"}
+                    return fail(
+                        "冻结前还缺：" + "、".join(names.get(m) or m for m in missing)
+                        + "。这三样缺一样，冻结的就是一个方向，不是一次检验。"
+                    )
+                latest = _state.lock_protocol(project, locked=True)
+            return report_protocol(project, latest)
 
         if action == "set_state":
             # Where the project stands: the goal, the phase, the current
@@ -2149,6 +2300,33 @@ def _note_seen_session(raw: Any, resolved: str) -> None:
         _state.note_active_session(resolved)
 
 
+def _protocol_block_message(topic: str) -> str:
+    """What to write before searching, and why it has to be written first."""
+    missing = _state.protocol_missing_fields(topic)
+    names = {
+        "estimand": "估计量（这一项分析到底在估哪个量）",
+        "inclusion": "纳入标准",
+        "falsifier": "否证条件（什么结果会推翻它）",
+    }
+    if missing:
+        lacks = "\n".join(f"- {names.get(m, m)}" for m in missing)
+    else:
+        lacks = "- 都齐了，只差 freeze=true"
+    proto = _state.read_protocol(topic)
+    zot = str(proto.get("zotero_collection") or "").strip()
+    zot_line = f"\n文献库入口：Zotero 集合「{zot}」。" if zot else ""
+    return (
+        f"先别检索。「{topic}」已经过了定题阶段，但还没有冻结的方案。\n"
+        f"没有冻结方案就开始收集文献，是先把材料捞回来、再决定自己在数什么——"
+        f"收集到的每一条都会看起来有用，因为标准是事后才定的。\n"
+        f"现在缺：\n{lacks}{zot_line}\n"
+        f"写好并冻结：research_mode(action='protocol', project='{topic}', "
+        f"estimand='<在估哪个量>', inclusion='<标准1>|<标准2>', "
+        f"falsifier='<什么结果算推翻>', freeze=true)。\n"
+        f"冻结之后可以检索；要改方案，得给 unfreeze_reason，旧内容和理由都留痕。"
+    )
+
+
 def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """Hold a literature search until the agent has a topic to put it in.
 
@@ -2189,6 +2367,22 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
                         f"再检索。"
                     ),
                 }
+            # The plan is frozen before the searching starts, in the phases
+            # where searching means gathering. Every synthesis in this
+            # literature fixes its inclusion criteria before it looks at a
+            # record; the phases here went from framing straight to
+            # gathering, so the quantity being estimated could stay undefined
+            # for the whole run - which is what happened.
+            #
+            # Only evidence and weighing are gated. Closing and writing search
+            # to verify a citation, and exploring phases search on purpose -
+            # a gate there would block the work it exists to protect.
+            if (
+                _state.load_config().get("require_protocol", True)
+                and str(_state.read_map(topic).get("phase") or "") in ("evidence", "weighing")
+                and not _state.protocol_locked(topic)
+            ):
+                return {"action": "block", "message": _protocol_block_message(topic)}
             # The topic is open. A run that searches forever and never answers
             # is the failure this catches: interrupt, ask for a record or a
             # conclusion, then let the work continue.

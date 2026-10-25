@@ -1077,6 +1077,149 @@ def test_the_status_line_can_be_turned_off():
         state.save_config({"status_line": False})
 
 
+def _proto_topic(m, name, sid, phase="evidence"):
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+    m._tool_handler({"action": "on", "project": name}, session_id=sid)
+    m._tool_handler({"action": "set_state", "project": name, "phase": phase}, session_id=sid)
+
+
+def test_a_protocol_is_a_draft_until_it_is_frozen():
+    m = _handler()
+    sid, name = "t-proto-draft", "T-proto-draft"
+    _proto_topic(m, name, sid)
+    out = json.loads(m._tool_handler(
+        {
+            "action": "protocol",
+            "project": name,
+            "estimand": "患者内认知变化，安慰剂臂作练习效应参照",
+            "inclusion": "成人 MDD|基线加至少一个 >=4 周随访|客观测验",
+            "falsifier": "短端与中段在可比域上无系统差异",
+        },
+        session_id=sid,
+    ))
+    assert out.get("locked") is False, out
+    assert out.get("protocol", {}).get("inclusion") == [
+        "成人 MDD", "基线加至少一个 >=4 周随访", "客观测验"
+    ], out
+    assert out.get("missing_before_freeze") == [], out
+
+
+def test_freezing_needs_an_estimand_inclusion_and_falsifier():
+    m = _handler()
+    sid, name = "t-proto-missing", "T-proto-missing"
+    _proto_topic(m, name, sid)
+    m._tool_handler(
+        {"action": "protocol", "project": name, "estimand": "某个量"}, session_id=sid
+    )
+    out = json.loads(
+        m._tool_handler({"action": "protocol", "project": name, "freeze": True}, session_id=sid)
+    )
+    assert "error" in out, out
+    assert "纳入标准" in out["error"] and "否证条件" in out["error"], out
+    assert state.protocol_locked(name) is False
+
+
+def test_a_frozen_protocol_cannot_be_edited_without_a_reason():
+    """The freeze is the whole point: a plan changed after the data arrived
+    has to show up as a change."""
+    m = _handler()
+    sid, name = "t-proto-frozen", "T-proto-frozen"
+    _proto_topic(m, name, sid)
+    m._tool_handler(
+        {
+            "action": "protocol",
+            "project": name,
+            "estimand": "患者内变化",
+            "inclusion": "成人 MDD",
+            "falsifier": "无系统差异",
+            "freeze": True,
+        },
+        session_id=sid,
+    )
+    assert state.protocol_locked(name) is True
+    out = json.loads(m._tool_handler(
+        {"action": "protocol", "project": name, "estimand": "换一个量"}, session_id=sid
+    ))
+    assert "error" in out and "unfreeze_reason" in out["error"], out
+
+    out = json.loads(m._tool_handler(
+        {
+            "action": "protocol",
+            "project": name,
+            "estimand": "换一个量",
+            "unfreeze_reason": "第一版把对照类型和时长混在一条轴上",
+        },
+        session_id=sid,
+    ))
+    assert "error" not in out, out
+    assert out["locked"] is False
+    history = out["protocol"].get("history") or []
+    assert history and history[-1]["locked"] is False, history
+    assert "对照类型" in history[-1]["reason"], history[-1]
+    assert history[-1].get("previous", {}).get("estimand") == "患者内变化", history[-1]
+    assert state.read_protocol(name).get("estimand") == "换一个量"
+
+
+def test_a_search_is_refused_in_gathering_phases_without_a_frozen_protocol():
+    m = _handler()
+    sid, name = "t-proto-gate", "T-proto-gate"
+    _proto_topic(m, name, sid, phase="evidence")
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    out = m._pre_tool_call(tool_name="web_search", session_id=sid, turn_id="t1")
+    assert out is not None and out.get("action") == "block", out
+    assert "冻结" in out["message"], out["message"]
+
+    m._tool_handler(
+        {
+            "action": "protocol",
+            "project": name,
+            "estimand": "患者内变化",
+            "inclusion": "成人 MDD",
+            "falsifier": "无系统差异",
+            "freeze": True,
+        },
+        session_id=sid,
+    )
+    assert m._pre_tool_call(tool_name="web_search", session_id=sid, turn_id="t2") is None
+
+
+def test_exploring_phases_do_not_need_a_protocol():
+    """A gate in the open phases would block the searching they exist for."""
+    m = _handler()
+    sid, name = "t-proto-open", "T-proto-open"
+    _proto_topic(m, name, sid, phase="diverging")
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    assert m._pre_tool_call(tool_name="web_search", session_id=sid, turn_id="t1") is None
+
+
+def test_the_protocol_page_renders_before_the_ledger():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "render_obsidian_probe", "/home/twebery/research-os/scripts/render_obsidian.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    text = mod._render_protocol(
+        "T-render",
+        {
+            "locked": True,
+            "locked_at": 1792920000.0,
+            "estimand": "患者内变化，安慰剂臂作练习参照",
+            "inclusion": ["成人 MDD", "客观测验"],
+            "falsifier": "短端与中段无系统差异",
+            "zotero_collection": "ABCD1234",
+            "history": [{"at": 1792920000.0, "locked": True}],
+        },
+        obsidian=True,
+    )
+    assert "已冻结" in text, text
+    assert "患者内变化，安慰剂臂作练习参照" in text, text
+    assert "zotero://select/library/collections/ABCD1234" in text, text
+    assert "冻结与解冻记录" in text, text
+
+
 class _FakeCtx:
     """Stands in for the PluginContext: the only thing used is post_message."""
 

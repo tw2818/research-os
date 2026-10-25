@@ -192,6 +192,11 @@ A topic is one research question and the state that accumulates around it:
     review.json             reviews made, the last verdict, whether it is paused
     search-count.json       searches run on this topic, and how often it was interrupted
     sources.json            the literature library
+    protocol.json          the plan, frozen before the searching starts:
+                            the estimand, inclusion/exclusion, the primary
+                            outcome, what would falsify the claim, and the
+                            Zotero collection the study searches and files
+                            against
 ```
 
 `research-map.json` is not a literature summary. It is the current state of
@@ -380,6 +385,7 @@ elsewhere.
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |
 | `literature_backend` | `auto` | `auto` uses a bibliography service if the agent has one, and files if it does not; `zotero` and `files` pin it |
 | `require_vault` | `false` | `true` makes a missing Obsidian vault an error instead of falling back to plain markdown |
+| `require_protocol` | `true` | in the `evidence` and `weighing` phases, refuse a literature search until the topic's plan is frozen with `action='protocol'` and `freeze=true` |
 | `notes_dir` | - | where the notes go when there is no vault (default: `<state home>/notes/`) |
 
 A topic can override the review interval in its own `research-map.json`
@@ -428,6 +434,8 @@ research_mode(action="hypothesis", project="X", hypothesis="an untested idea")
 research_mode(action="repair", project="X")
 research_mode(action="delete", project="X")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
+research_mode(action="protocol", project="X", estimand="...",
+              inclusion="A | B", falsifier="...", freeze=True)
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")
 research_mode(action="library", project="X")

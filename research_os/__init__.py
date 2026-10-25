@@ -592,7 +592,99 @@ def _expand_source(project: str, claim: dict[str, Any]) -> dict[str, Any]:
     return claim
 
 
+_CTX: Any = None       # the PluginContext, kept for host-side posting
+_LAST_NOTICE = ""      # the last line posted; the same line twice is not a transition
+
+
+def _notify(text: str) -> None:
+    """Post one line into the conversation when the work changes stage.
+
+    `PluginContext.post_message` is the host's own channel for this: it posts
+    into the session bound to the call, never into another chat, and it refuses
+    outside a live gateway by returning a result rather than raising. Nothing
+    here is load-bearing, so every failure is swallowed - a refused post must
+    not break the action that triggered it.
+
+    A line on every answer was the first version and the user said what was
+    wrong with it: a turn that only calls tools ends with a line saying where
+    the work stopped, and nothing saying how it got there. A notice at the
+    moment the stage changes is the thing that was wanted, and it is posted as
+    its own message rather than appended to prose the reader is still reading.
+    """
+    global _LAST_NOTICE
+    try:
+        text = str(text or "").strip()
+        if _CTX is None or not text:
+            return
+        if not _state.load_config().get("transition_notice", True):
+            return
+        if text == _LAST_NOTICE:
+            return
+        _LAST_NOTICE = text
+        _CTX.post_message(text)
+    except Exception:
+        return
+
+
+def _notice_snapshot(args: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """What the state looked like before the call, for the transitions after it."""
+    try:
+        project = str(args.get("project") or "").strip()
+        session_id = str(kwargs.get("session_id") or args.get("session_id") or "").strip()
+        if not session_id or session_id == "unknown":
+            session_id = _state.active_session() or ""
+        s = _state.read_session(session_id) if session_id else {}
+        phase = ""
+        if project and _state.topic_exists(project):
+            phase = str(_state.read_map(project).get("phase") or "")
+        return {
+            "project": project,
+            "session_id": session_id,
+            "topic": str(s.get("topic") or ""),
+            "phase": phase,
+        }
+    except Exception:
+        return {}
+
+
+def _notify_transitions(before: dict[str, Any], args: dict[str, Any], raw: str) -> None:
+    """One line per stage change, and nothing when nothing changed."""
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else {}
+    except Exception:
+        return
+    if not isinstance(payload, dict) or payload.get("error"):
+        return
+    action = str(args.get("action") or "").strip().lower()
+    topic = str(payload.get("topic") or payload.get("project") or before.get("project") or "")
+    if action in ("on", "switch") and topic:
+        m = _state.read_map(topic)
+        label = _protocol.phase_name(str(m.get("phase") or "")) or "阶段未定"
+        _notify(f"科研 · 进入 {topic}（{label}）· 账本 {len(_state.read_claims(topic))} 条")
+    elif action == "off":
+        left = before.get("topic") or "课题"
+        _notify(f"科研 · 离开 {left}，回到普通对话")
+    elif action == "set_state" and topic:
+        new = str(_state.read_map(topic).get("phase") or "")
+        old = str(before.get("phase") or "")
+        if new and new != old:
+            old_label = _protocol.phase_name(old) or "未定"
+            _notify(f"科研 · {topic} · 阶段 {old_label} → {_protocol.phase_name(new)}")
+    elif action == "review" and topic:
+        verdict = str(args.get("verdict") or "")
+        note = " ".join(str(args.get("review_note") or args.get("note") or "").split())
+        _notify(f"科研 · {topic} · 审查 {verdict}：{note[:70]}")
+
+
 def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    """The tool, wrapped so a stage change is announced once as it happens."""
+    before = _notice_snapshot(args, kwargs)
+    raw = _tool_handler_raw(args, **kwargs)
+    _notify_transitions(before, args, raw)
+    return raw
+
+
+def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
     action = str(args.get("action") or "status").strip().lower()
     project = str(args.get("project") or "").strip()
     session_id = str(kwargs.get("session_id") or args.get("session_id") or "").strip()
@@ -1958,6 +2050,10 @@ def _convergence_check(
             # was interrupted has given up, and a run that reviews where it
             # is has decided something.
             demanded = _state.note_review_demand(topic)
+            if demanded == 1:
+                # The review becoming due is a stage change of its own: the
+                # work was exploring and is now being asked to stop and judge.
+                _notify(f"科研 · {topic} · 该做全局审查了（{_state.topic_search_count(topic)} 次检索）")
             if demanded <= 2:
                 return {"action": "block", "message": review_due}
             return None
@@ -2416,6 +2512,8 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
 
 
 def register(ctx: Any) -> None:
+    global _CTX
+    _CTX = ctx
     ctx.register_tool(
         name="research_mode",
         toolset="research_os",

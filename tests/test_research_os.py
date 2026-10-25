@@ -1005,6 +1005,7 @@ def test_the_status_line_says_where_the_work_stands():
         },
         session_id=sid,
     )
+    state.save_config({"status_line": True})
     state.note_tool_activity(sid, "t9", tool_name="web_search", is_evidence=True, is_ledger=0)
     state.note_tool_activity(sid, "t9", tool_name="research_mode", is_evidence=False, is_ledger=2)
     state.note_search_since_review(name)
@@ -1024,6 +1025,9 @@ def test_the_status_line_says_where_the_work_stands():
     assert "账本 2 条" in footer, footer
     assert "审查后 1 次检索" in footer, footer
     assert "欠审查 2 轮" in footer, footer
+    # Put the default back: the next tests assert the default, and a config
+    # left on is how one test's fixture becomes another test's bug.
+    state.save_config({"status_line": False})
 
 
 def test_the_status_line_marks_a_topic_with_no_phase():
@@ -1038,9 +1042,13 @@ def test_the_status_line_marks_a_topic_with_no_phase():
         {"action": "create", "project": name, "core_question": "Q?"}, session_id=sid
     )
     m._tool_handler({"action": "on", "project": name}, session_id=sid)
-    line = m._status_line(sid, name, "")
-    assert "阶段未定" in line, line
-    assert "本轮" not in line, line
+    state.save_config({"status_line": True})
+    try:
+        line = m._status_line(sid, name, "")
+        assert "阶段未定" in line, line
+        assert "本轮" not in line, line
+    finally:
+        state.save_config({"status_line": False})
 
 
 def test_the_status_line_can_be_turned_off():
@@ -1053,22 +1061,169 @@ def test_the_status_line_can_be_turned_off():
         {"action": "create", "project": name, "core_question": "Q?"}, session_id=sid
     )
     m._tool_handler({"action": "on", "project": name}, session_id=sid)
-    assert m._status_line(sid, name, "") != ""
-    state.save_config({"status_line": False})
+    # Off is the default now: the footer said where the work stopped, and a
+    # turn that only calls tools showed nothing about how it moved.
+    assert m._status_line(sid, name, "") == ""
+    state.save_config({"status_line": True})
     try:
-        assert m._status_line(sid, name, "") == ""
+        assert m._status_line(sid, name, "") != ""
         out = m._transform_llm_output(
             session_id=sid,
             turn_id="t1",
             response_text="综合来看，这更支持残余缺损确实存在。",
         )
-        assert out is None, out
+        assert out is not None and "科研 ·" in out, out
     finally:
-        state.save_config({"status_line": True})
+        state.save_config({"status_line": False})
+
+
+class _FakeCtx:
+    """Stands in for the PluginContext: the only thing used is post_message."""
+
+    def __init__(self):
+        self.posted = []
+
+    def post_message(self, text):
+        self.posted.append(text)
+        return None
+
+
+def _ctx_for(m):
+    ctx = _FakeCtx()
+    m._CTX = ctx
+    m._LAST_NOTICE = ""
+    return ctx
+
+
+def test_entering_a_topic_posts_one_status_line():
+    """A stage change is posted as its own message, not appended to an answer.
+
+    A line on every answer said where the work stopped and never how it got
+    there, and a turn that only calls tools showed nothing at all - which is
+    the complaint this answers.
+    """
+    m = _handler()
+    sid = "t-notice-enter"
+    name = "T-notice-enter"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    ctx = _ctx_for(m)
+    try:
+        m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        assert len(ctx.posted) == 1, ctx.posted
+        assert ctx.posted[0].startswith(f"科研 · 进入 {name}"), ctx.posted[0]
+        # Entering the same topic again is not a new stage.
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        assert len(ctx.posted) == 1, ctx.posted
+    finally:
+        m._CTX = None
+        m._LAST_NOTICE = ""
+
+
+def test_a_phase_change_is_announced_once_per_change():
+    m = _handler()
+    sid = "t-notice-phase"
+    name = "T-notice-phase"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    ctx = _ctx_for(m)
+    try:
+        m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        ctx.posted.clear()
+        m._tool_handler({"action": "set_state", "project": name, "phase": "diverging"}, session_id=sid)
+        assert len(ctx.posted) == 1, ctx.posted
+        assert "阶段" in ctx.posted[0] and "→" in ctx.posted[0], ctx.posted[0]
+        assert "扩大" in ctx.posted[0] or "发散" in ctx.posted[0] or ctx.posted[0], ctx.posted[0]
+        # Setting the same phase again is not a change.
+        m._tool_handler({"action": "set_state", "project": name, "phase": "diverging"}, session_id=sid)
+        assert len(ctx.posted) == 1, ctx.posted
+        # A different phase is.
+        m._tool_handler({"action": "set_state", "project": name, "phase": "weighing"}, session_id=sid)
+        assert len(ctx.posted) == 2, ctx.posted
+    finally:
+        m._CTX = None
+        m._LAST_NOTICE = ""
+
+
+def test_a_recorded_review_is_announced():
+    m = _handler()
+    sid = "t-notice-review"
+    name = "T-notice-review"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    ctx = _ctx_for(m)
+    try:
+        m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        ctx.posted.clear()
+        m._tool_handler(
+            {
+                "action": "review",
+                "project": name,
+                "verdict": "continue",
+                "review_note": "材料没有改变判断，继续检索只能补数量",
+            },
+            session_id=sid,
+        )
+        assert len(ctx.posted) == 1, ctx.posted
+        assert "审查 continue" in ctx.posted[0], ctx.posted[0]
+        assert "材料没有改变判断" in ctx.posted[0], ctx.posted[0]
+    finally:
+        m._CTX = None
+        m._LAST_NOTICE = ""
+
+
+def test_a_review_becoming_due_is_announced_once():
+    """The transition from exploring to being asked to judge is the one the
+    user named: it happens mid-run, and nothing else says so."""
+    m = _handler()
+    sid = "t-notice-due"
+    name = "T-notice-due"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    ctx = _ctx_for(m)
+    try:
+        m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+        for _ in range(9):
+            m._post_tool_call(tool_name="web_search", session_id=sid, turn_id="t1")
+        ctx.posted.clear()
+        out = m._pre_tool_call(tool_name="web_search", session_id=sid, turn_id="t2")
+        assert out is not None and out.get("action") == "block", out
+        assert len(ctx.posted) == 1, ctx.posted
+        assert "该做全局审查了" in ctx.posted[0], ctx.posted[0]
+        # The second refusal is the same demand, not a new stage.
+        out2 = m._pre_tool_call(tool_name="web_search", session_id=sid, turn_id="t2")
+        assert out2 is not None
+        assert len(ctx.posted) == 1, ctx.posted
+    finally:
+        m._CTX = None
+        m._LAST_NOTICE = ""
+
+
+def test_transition_notices_can_be_turned_off():
+    m = _handler()
+    sid = "t-notice-off"
+    name = "T-notice-off"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    ctx = _ctx_for(m)
+    state.save_config({"transition_notice": False})
+    try:
+        m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+        m._tool_handler({"action": "on", "project": name}, session_id=sid)
+        assert ctx.posted == [], ctx.posted
+    finally:
+        state.save_config({"transition_notice": True})
+        m._CTX = None
+        m._LAST_NOTICE = ""
 
 
 def test_transform_llm_output_quiet_when_there_is_a_position():
-    """No demand for a position - only the status line, which is on always."""
+    """No demand for a position, and the footer is off unless it is asked for."""
     m = _handler()
     sid = "t-transform2"
     m._tool_handler(
@@ -1088,11 +1243,7 @@ def test_transform_llm_output_quiet_when_there_is_a_position():
             "综合来看，这更支持残余缺损确实存在，而不是完全由当前症状解释。"
         ),
     )
-    assert out is not None, out
-    assert "没给判断" not in out, out
-    footer = out.split("---")[-1].strip()
-    assert footer.startswith("科研 · TrTopic2"), footer
-    assert "账本 1 条" in footer, footer
+    assert out is None, out
 
 
 def test_transform_llm_output_asks_for_a_position_with_an_empty_ledger():
@@ -2494,12 +2645,9 @@ def test_an_open_phase_does_not_demand_a_position():
     out = m._transform_llm_output(
         response_text=answer, session_id="t-open"
     )
-    # No demand for a position - but the status line rides on every answer,
-    # including this one, so "quiet" no longer means None.
-    assert out is not None, out
-    assert "没给判断" not in out, out
-    assert out.startswith(answer), out
-    assert "科研 · T-open · " in out, out
+    # No demand for a position. The status line is off by default now -
+    # a per-answer footer said where the work stopped, not how it moved.
+    assert out is None, out
 
     # The same answer in a closing phase is a different answer: a
     # conclusion with no position in it is not a conclusion.

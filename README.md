@@ -20,6 +20,7 @@ Research OS changes *how the agent reasons*, not what it knows.
 | `pre_tool_call` | a **hook** that holds a search | the system keeps the search attached to a question |
 | `post_tool_call` | a **hook** that records what happened | the system tracks evidence and records |
 | `transform_llm_output` | a **hook** that checks the outgoing answer | the system catches what was said but never recorded |
+| `post_message` | a **host channel** the plugin posts through | the loop is invisible from the chat: the topic, the phase and the counters live in files nobody opens, so a stage change is announced as its own short message |
 
 The tool is the switch; the hooks are the reflex.
 
@@ -372,7 +373,8 @@ elsewhere.
 | `obsidian_enabled` | `true` | set `false` to skip the vault rendering |
 | `inject_protocol` | `true` | set `false` to turn the whole thing off |
 | `max_inject_chars` | `1600` | how much protocol text rides along |
-| `status_line` | `true` | every answer ends with one line of state: the topic, the phase, what this turn did, the ledger size, how far the last review is behind, and whether one is owed |
+| `status_line` | `false` | `true` appends one line of state to every answer. Off by default: a line per answer says where the work stopped and never how it got there |
+| `transition_notice` | `true` | post a short status message into the chat when the work changes stage: entering a topic, a change of phase, a review becoming due, a recorded review, leaving |
 | `searches_before_converge` | `20` | searches on one topic before the agent is asked to record or conclude; `0` turns the check off |
 | `review_every_searches` | `8` | searches on one topic before a global review is demanded |
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |

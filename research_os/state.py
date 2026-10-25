@@ -154,10 +154,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # inside invites someone to edit the wrong file.
     "notes_dir": "",
     "inject_protocol": True,
-    # Whether every answer in research mode ends with one line saying where
-    # the work stands. Off means the loop is invisible from the chat: the
-    # topic, the phase and the counters live in files the user never opens.
-    "status_line": True,
+    # Whether every answer ends with a line of state. Off by default: a line
+    # per answer says where the work stopped and never how it got there, and a
+    # turn that only calls tools shows nothing at all. `transition_notice` is
+    # the one that answers "show me the process".
+    "status_line": False,
+    # Whether a stage change (entering a topic, a phase change, a review
+    # becoming due, a recorded review, leaving) is posted into the chat as its
+    # own short message. This needs a live gateway: outside one the post is
+    # refused and the action that triggered it carries on unaffected.
+    "transition_notice": True,
     # The block carries the project's standing, the situation, the thinking
     # moves and what the phase is for. It is long because the alternative is
     # an agent that answers the question in front of it and forgets the one

@@ -54,6 +54,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.6.3] — 2026-10-25
+
+- **The status moved out of the answer and onto the stage change.** A footer on
+  every answer reported the state at the end of each turn — which says where
+  the work stopped and never how it got there, and says nothing at all on a
+  turn that only calls tools. What was wanted is a line at the moment the work
+  changes stage, posted as its own message: entering a topic, a change of
+  phase, a review becoming due, a recorded review, leaving.
+- Posted through `PluginContext.post_message`, which is the host's own channel:
+  it posts into the session bound to the call and refuses outside a live
+  gateway by returning a result instead of raising. Every failure is swallowed,
+  because a status line must never break the action that triggered it.
+- The same line twice is not a second transition, so re-entering the topic or
+  setting the same phase again posts nothing. `transition_notice: false` turns
+  it off; `status_line` stays, now off by default.
+
 ## [0.6.2] — 2026-10-25
 
 - **Every answer now ends with one line of state.** The loop's state lives in

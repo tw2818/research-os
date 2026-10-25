@@ -7,6 +7,50 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-25
+
+### Added
+
+- **The state tree is writable only through the tool.** A `pre_tool_call`
+  guard blocks a direct write to the state tree, so the typed checks, the
+  source requirement, the inference strength rule and the dedup all still
+  apply to every row. Reading the state is allowed and necessary.
+
+### Fixed
+
+- The guard judges the write target, not whether the path is mentioned: a
+  command that reads the ledger and writes a summary elsewhere is allowed,
+  and a redirect only makes a path a target when it is immediately to the
+  left of it.
+- The package drops its own cached bytecode when it is imported, not only
+  when the plugin loader loads it. The tests and the scripts import the
+  package, and they were running old bytecode against new source.
+- Concurrent runs on one topic no longer double-count a finding: the ledger
+  keeps its own content key.
+
+## [0.2.0] — 2026-10-25
+
+### Added
+
+- **`pre_tool_call` search guard** — a literature search is held until a
+  topic exists, and a search run that is not converging is interrupted
+  instead of being allowed to keep going.
+- **`transform_llm_output` check** — the outgoing answer is compared against
+  the ledger, and what was said but never recorded is appended to it.
+- **`post_tool_call` accounting** — each turn records the literature tools
+  it used and the claims it wrote, so a run that searched forty times and
+  recorded nothing is visible.
+- **Inference types** — `descriptive`, `explanatory`, `predictive`,
+  `analogy`, `abductive`, each with its own obligation. An `abductive`
+  inference must list at least one competitor.
+- **Validator catches bundled claims** — one row may not carry an
+  observation together with the conclusion drawn from it.
+- **Leaving research mode in plain language** — "退出科研模式", "关掉研究模式",
+  "结束课题". Hermes intercepts slash commands it does not know, so
+  `/research off` never reaches the plugin.
+- **Self-contained install** — the installer points at the published
+  repository, honours `--enable`, and keeps the CLI next to the state.
+
 ## [0.1.0] — 2026-10-24
 
 First working version.

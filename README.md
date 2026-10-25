@@ -168,14 +168,13 @@ worse than a long search.
 ## Using it
 
 You do not need to learn any commands. The agent opens research mode when the
-question warrants it, and closes it when you move on.
+question warrants it, and closes it when you move on. Ask for it in plain
+language — "研究一下这个课题", "开科研模式", "退出科研模式" — and the agent
+enters and leaves accordingly.
 
-To be explicit:
-
-```
-/research Sleep-Memory      enter research mode on a topic
-/chore                        leave it
-```
+Leaving works in plain language for a reason: Hermes resolves slash commands
+itself and rejects the ones it does not know, so `/research off` never
+reaches the plugin.
 
 Direct tool use:
 

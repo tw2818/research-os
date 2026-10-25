@@ -10,3 +10,6 @@ state/
 sessions/
 topics/
 *.bak
+
+# Acceptance runs: local evidence, not part of the package
+.acceptance/

@@ -22,7 +22,7 @@ os.environ["RESEARCH_OS_HOME"] = _TMP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from research_os import audit, classify, protocol, state  # noqa: E402
+from research_os import audit, classify, protocol, reviewer, state  # noqa: E402
 from research_os.validate import validate_claims  # noqa: E402
 
 
@@ -384,7 +384,7 @@ def test_the_turn_is_given_a_direction_not_a_nag():
     assert out is not None
     ctx = out["context"]
     assert "比较两个解释的证据强度" in ctx
-    assert "哪个解释现在更划算" in ctx
+    assert protocol.phase_output("synthesis") in ctx
     # And the nag is gone.
     assert "账本还是空的" not in ctx
 
@@ -1220,6 +1220,394 @@ def test_the_protocol_page_renders_before_the_ledger():
     assert "冻结与解冻记录" in text, text
 
 
+class _FakeLLM:
+    """The host's LLM facade, faked.
+
+    The gate only ever calls `complete_structured` and reads `.parsed`,
+    `.model` and `.provider`, so that is the whole surface a test needs.
+    """
+
+    def __init__(self, payload=None, *, error=None, model="fake-reviewer"):
+        self.payload = payload
+        self.error = error
+        self.model = model
+        self.calls = []
+
+    def complete_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return _LLMResult(self.payload)
+
+
+class _LLMResult:
+    """What `complete_structured` hands back: parsed JSON, and who said it."""
+
+    def __init__(self, parsed):
+        self.parsed = parsed
+        self.model = "fake-reviewer"
+        self.provider = "fake"
+
+
+def _gate_payload(total=8, *, blocking=(), summary="可以往下走。"):
+    scores = {
+        "alignment": total, "progression": total, "grounding": total,
+        "convergence": total, "deliverable": total,
+    }
+    return {
+        "scores": scores,
+        "blocking_issues": list(blocking),
+        "summary": summary,
+        "recommendation": "pass" if not blocking and total >= 7 else "revise",
+    }
+
+
+def _topic_with_phase(m, name, phase, sid=None):
+    sid = sid or f"t-{name}"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler({"action": "create", "project": name, "core_question": "Q?"}, session_id=sid)
+    m._tool_handler({"action": "on", "project": name}, session_id=sid)
+    state.write_state(name, phase=phase)
+    return sid
+
+
+def test_a_branch_must_say_which_part_of_the_core_question_it_serves():
+    """The anti-drift control. A route nobody can tie to the core question is
+    a new project wearing a branch's clothes."""
+    m = _handler()
+    sid = _topic_with_phase(m, "T-branch-why", "diverging")
+    out = json.loads(m._tool_handler(
+        {"action": "branch", "project": "T-branch-why", "route": "换个物种再测一遍"},
+        session_id=sid,
+    ))
+    assert "error" in out and "why_relevant" in out["error"], out
+    assert state.list_branches("T-branch-why") == [], "a refused branch must not be registered"
+
+
+def test_a_branch_gets_its_own_topic_so_its_evidence_does_not_leak():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-branch-open", "diverging")
+    out = json.loads(m._tool_handler(
+        {
+            "action": "branch", "project": "T-branch-open",
+            "route": "检验短窗口内练习效应能否解释认知增益",
+            "why_relevant": "核心问题里的'短端看不到额外增益'需要这一条来定位机制",
+        },
+        session_id=sid,
+    ))
+    assert "error" not in out, out
+    child = out["child_topic"]
+    assert state.topic_exists(child), out
+    assert state.read_map(child).get("parent") == "T-branch-open", state.read_map(child)
+    assert state.read_phase(child) == "standing", "a branch starts by confirming its own state"
+    assert out["branch"]["id"] == "B1" and out["open_branches"] == 1, out
+
+
+def test_branches_are_capped_because_five_beginnings_is_not_a_review():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-branch-cap", "diverging")
+    cfg = state.load_config()
+    state.save_config({"max_branches": 2})
+    try:
+        for i in range(2):
+            got = json.loads(m._tool_handler(
+                {"action": "branch", "project": "T-branch-cap",
+                 "route": f"路线 {i+1}", "why_relevant": "都服务核心问题的不同侧面"},
+                session_id=sid,
+            ))
+            assert "error" not in got, got
+        blocked = json.loads(m._tool_handler(
+            {"action": "branch", "project": "T-branch-cap",
+             "route": "第三条路线", "why_relevant": "也想追"},
+            session_id=sid,
+        ))
+        assert "error" in blocked, blocked
+        assert "上限" in blocked["error"] and "B1" in blocked["error"], blocked
+    finally:
+        state.save_config({"max_branches": cfg["max_branches"]})
+
+
+def test_a_branch_cannot_go_deeper_than_the_cap():
+    """Depth is the other way a tree fragments: every branch can open
+    branches, and the core question is four levels up by the end."""
+    m = _handler()
+    sid = _topic_with_phase(m, "T-branch-deep", "diverging")
+    cfg = state.load_config()
+    state.save_config({"max_branch_depth": 1})
+    try:
+        got = json.loads(m._tool_handler(
+            {"action": "branch", "project": "T-branch-deep", "route": "第一层路线",
+             "why_relevant": "服务核心问题"},
+            session_id=sid,
+        ))
+        child = got["child_topic"]
+        state.write_state(child, phase="diverging")
+        deeper = json.loads(m._tool_handler(
+            {"action": "branch", "project": child, "route": "第二层路线",
+             "why_relevant": "再往下切"},
+            session_id=f"t-{child}",
+        ))
+        assert "error" in deeper, deeper
+        assert "层" in deeper["error"], deeper
+    finally:
+        state.save_config({"max_branch_depth": cfg["max_branch_depth"]})
+
+
+def test_closing_a_branch_requires_what_it_contributed():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-branch-close", "diverging")
+    got = json.loads(m._tool_handler(
+        {"action": "branch", "project": "T-branch-close", "route": "A 路线",
+         "why_relevant": "服务核心问题"},
+        session_id=sid,
+    ))
+    bare = json.loads(m._tool_handler(
+        {"action": "branch", "project": "T-branch-close", "branch_id": "B1",
+         "branch_status": "concluded"},
+        session_id=sid,
+    ))
+    assert "error" in bare and "contribution" in bare["error"], bare
+    done = json.loads(m._tool_handler(
+        {"action": "branch", "project": "T-branch-close", "branch_id": "B1",
+         "branch_status": "concluded",
+         "contribution": "排除了练习效应：对照组也复测，没有同等增益。"},
+        session_id=sid,
+    ))
+    assert "error" not in done, done
+    assert done["branch"]["status"] == "concluded", done
+    assert done["open_branches"] == 0, done
+    assert "练习效应" in state.list_branches("T-branch-close")[0]["contribution"]
+
+
+def test_leaving_the_diverging_station_needs_two_routes():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-two-routes", "diverging")
+    out = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-two-routes", "phase": "evidence"},
+        session_id=sid,
+    ))
+    assert "error" in out and "两条" in out["error"], out
+    assert state.read_phase("T-two-routes") == "diverging"
+    for i in range(2):
+        m._tool_handler(
+            {"action": "branch", "project": "T-two-routes", "route": f"路线 {i+1}",
+             "why_relevant": "服务核心问题"},
+            session_id=sid,
+        )
+    ok_out = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-two-routes", "phase": "evidence"},
+        session_id=sid,
+    ))
+    assert "error" not in ok_out, ok_out
+    assert state.read_phase("T-two-routes") == "evidence"
+
+
+def test_leaving_converging_needs_a_passed_gate():
+    """The gate is a control, not a suggestion: no review, no record."""
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-block", "converging")
+    out = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-gate-block", "phase": "updating"},
+        session_id=sid,
+    ))
+    assert "error" in out and "审稿" in out["error"], out
+    assert state.read_phase("T-gate-block") == "converging"
+
+
+def test_a_blocking_issue_holds_the_project_until_it_is_fixed():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-revise", "converging")
+    fake = _FakeLLM(_gate_payload(5, blocking=[{
+        "axis": "alignment", "problem": "这一轮在比较两种量表，没回到核心问题",
+        "where": "叙事第二段", "fix": "把量表的比较挂回'耦合是否随窗口变化'",
+    }]))
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    got = json.loads(m._tool_handler(
+        {"action": "gate", "project": "T-gate-revise"}, session_id=sid
+    ))
+    assert got["verdict"] == "revise", got
+    assert "没回到核心问题" in got["must_fix"], got
+    blocked = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-gate-revise", "phase": "updating"},
+        session_id=sid,
+    ))
+    assert "error" in blocked and "没回到核心问题" in blocked["error"], blocked
+
+
+def test_a_clean_review_lets_the_project_through():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-pass", "converging")
+    fake = _FakeLLM(_gate_payload(8))
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    got = json.loads(m._tool_handler(
+        {"action": "gate", "project": "T-gate-pass"}, session_id=sid
+    ))
+    assert got["verdict"] == "pass", got
+    passed = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-gate-pass", "phase": "updating"},
+        session_id=sid,
+    ))
+    assert "error" not in passed, passed
+    # The reviewer was given the standing, not a message.
+    assert fake.calls, "the gate never called the model"
+    brief = fake.calls[0]["input"][0]["text"]
+    assert "核心问题" in brief and "现在相信什么" in brief, brief[:200]
+
+
+def test_endless_revision_ends_with_a_written_caveat():
+    """Scores are not objective and a gate that waits for a perfect score
+    waits forever. After max_rounds the work goes through, and the record
+    says why."""
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-caveat", "converging")
+    fake = _FakeLLM(_gate_payload(4, blocking=[{
+        "axis": "progression", "problem": "还在原地", "where": "计划段", "fix": "换判据",
+    }]))
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    cfg = state.load_config()
+    state.save_config({"gate_max_rounds": 2})
+    try:
+        first = json.loads(m._tool_handler({"action": "gate", "project": "T-gate-caveat"}, session_id=sid))
+        assert first["verdict"] == "revise", first
+        second = json.loads(m._tool_handler({"action": "gate", "project": "T-gate-caveat"}, session_id=sid))
+        assert second["verdict"] == "pass_with_caveat", second
+        assert "caveat" in second["next"], second
+        through = json.loads(m._tool_handler(
+            {"action": "set_state", "project": "T-gate-caveat", "phase": "updating"},
+            session_id=sid,
+        ))
+        assert "error" not in through, through
+    finally:
+        state.save_config({"gate_max_rounds": cfg["gate_max_rounds"]})
+
+
+def test_a_reviewer_that_cannot_run_is_a_caveat_not_a_deadlock():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-down", "converging")
+    fake = _FakeLLM(error=RuntimeError("provider 502"))
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    got = json.loads(m._tool_handler({"action": "gate", "project": "T-gate-down"}, session_id=sid))
+    assert got["verdict"] == "pass_with_caveat", got
+    assert "502" in got.get("error_note", ""), got
+    through = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-gate-down", "phase": "updating"},
+        session_id=sid,
+    ))
+    assert "error" not in through, through
+    record = state.last_gate_review("T-gate-down")
+    assert record["llm_ok"] is False and "502" in record["error"], record
+
+
+def test_the_gate_scores_are_average_and_the_threshold_decides():
+    assert reviewer.total_score({"alignment": 8, "progression": 6, "grounding": 7,
+                                 "convergence": 9, "deliverable": 5}) == 7.0
+    verdict, why = reviewer.decide(blocking=[], total=7.4, round_no=1,
+                                   pass_score=7.0, max_rounds=3)
+    assert verdict == "pass", (verdict, why)
+    verdict, why = reviewer.decide(blocking=[], total=6.9, round_no=1,
+                                   pass_score=7.0, max_rounds=3)
+    assert verdict == "revise", (verdict, why)
+
+
+def test_editing_the_plugin_source_is_not_a_ledger_write():
+    """The guard matches on text, and this file contains the call names it
+    looks for. Blocking source maintenance is how a guard teaches people to
+    route around it."""
+    code = (
+        "from hermes_tools import patch as P\n"
+        "P(path='/home/twebery/research-os/research_os/__init__.py', "
+        "old_string='state.write_map(x)', new_string='state.write_map(y)')\n"
+    )
+    assert m_guard_allows(code), "editing the plugin source must not be blocked"
+
+
+def m_guard_allows(code: str) -> bool:
+    import research_os as _m
+    out = _m._state_write_guard(tool_name="execute_code", args={"code": code})
+    return out is None
+
+
+def test_a_phase_written_with_an_old_name_is_translated():
+    m = _handler()
+    sid = "t-alias"
+    if state.topic_exists("T-alias"):
+        state.delete_topic("T-alias", permanent=True)
+    m._tool_handler({"action": "create", "project": "T-alias", "core_question": "Q?"}, session_id=sid)
+    out = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-alias", "phase": "weighing"}, session_id=sid
+    ))
+    assert "error" not in out, out
+    assert state.read_phase("T-alias") == "synthesis", state.read_phase("T-alias")
+
+
+def test_a_fenced_json_reply_still_counts():
+    """Providers that ignore `response_format` still send the object, wrapped.
+    Failing the gate on that is failing it on the wrong thing."""
+    assert reviewer._extract_json('```json\n{"scores": {"alignment": 8}}\n```') == {
+        "scores": {"alignment": 8}
+    }
+    assert reviewer._extract_json('好的，这是评估：{"summary": "可以"}') == {"summary": "可以"}
+    assert reviewer._extract_json("不是 JSON") is None
+
+
+class _ScriptedLLM:
+    """A facade that answers each call from a script, to test the fallbacks."""
+
+    def __init__(self, complete_text="", structured_payload=None):
+        self.complete_text = complete_text
+        self.structured_payload = structured_payload
+        self.complete_calls = 0
+        self.structured_calls = 0
+
+    def complete(self, **kwargs):
+        self.complete_calls += 1
+
+        class _R:
+            text = self.complete_text
+            model = "scripted"
+            provider = "fake"
+
+        return _R()
+
+    def complete_structured(self, **kwargs):
+        self.structured_calls += 1
+
+        class _R:
+            parsed = self.structured_payload
+            text = ""
+            model = "scripted"
+            provider = "fake"
+
+        return _R()
+
+
+def test_a_json_reply_in_a_fenced_block_is_read_from_the_text():
+    """The primary path is a plain completion: a provider that accepts a
+    schema and returns nothing leaves the gate with no material."""
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-fence", "converging")
+    payload = _gate_payload(8)
+    fake = _ScriptedLLM(complete_text="```json\n" + json.dumps(payload) + "\n```")
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    got = json.loads(m._tool_handler({"action": "gate", "project": "T-gate-fence"}, session_id=sid))
+    assert got["verdict"] == "pass", got
+    assert state.last_gate_review("T-gate-fence")["via"] == "complete"
+    assert fake.complete_calls == 1 and fake.structured_calls == 0
+
+
+def test_an_empty_reply_falls_back_to_the_structured_call():
+    m = _handler()
+    sid = _topic_with_phase(m, "T-gate-retry", "converging")
+    fake = _ScriptedLLM(complete_text="", structured_payload=_gate_payload(8))
+    m._CTX = type("C", (), {"llm": fake, "posted": []})()
+    got = json.loads(m._tool_handler({"action": "gate", "project": "T-gate-retry"}, session_id=sid))
+    assert got["verdict"] == "pass", got
+    record = state.last_gate_review("T-gate-retry")
+    assert record["via"] == "structured" and record["attempts"] == 2, record
+    assert fake.structured_calls == 1
+
+
 class _FakeCtx:
     """Stands in for the PluginContext: the only thing used is post_message."""
 
@@ -1278,13 +1666,21 @@ def test_a_phase_change_is_announced_once_per_change():
         m._tool_handler({"action": "set_state", "project": name, "phase": "diverging"}, session_id=sid)
         assert len(ctx.posted) == 1, ctx.posted
         assert "阶段" in ctx.posted[0] and "→" in ctx.posted[0], ctx.posted[0]
-        assert "扩大" in ctx.posted[0] or "发散" in ctx.posted[0] or ctx.posted[0], ctx.posted[0]
+        assert "发散" in ctx.posted[0], ctx.posted[0]
         # Setting the same phase again is not a change.
         m._tool_handler({"action": "set_state", "project": name, "phase": "diverging"}, session_id=sid)
         assert len(ctx.posted) == 1, ctx.posted
-        # A different phase is.
-        m._tool_handler({"action": "set_state", "project": name, "phase": "weighing"}, session_id=sid)
-        assert len(ctx.posted) == 2, ctx.posted
+        # A different phase is - but leaving 发散 needs the routes it was
+        # for, so two are opened first.
+        for route in ("路线一：检查测序深度的作用", "路线二：检查批次效应"):
+            m._tool_handler(
+                {"action": "branch", "project": name, "route": route,
+                 "why_relevant": "两条都能解释同一批差异"},
+                session_id=sid,
+            )
+        m._tool_handler({"action": "set_state", "project": name, "phase": "synthesis"}, session_id=sid)
+        assert len(ctx.posted) == 4, ctx.posted
+        assert "梳理理解" in ctx.posted[-1], ctx.posted[-1]
     finally:
         m._CTX = None
         m._LAST_NOTICE = ""
@@ -1627,14 +2023,14 @@ def test_each_phase_calls_for_a_different_way_of_thinking():
     while it should be deciding what to ask."""
     _fresh_topic("T-phase", "Q?")
     seen = set()
-    for phase in ("scoping", "evidence", "weighing", "closing", "writing"):
+    for phase in protocol.PHASE_ORDER:
         m = state.read_map("T-phase")
         m["phase"] = phase
         state.write_map("T-phase", m)
         block = protocol.build_research_block("T-phase", {"max_inject_chars": 2000})
         assert protocol.PHASES[phase]["thinking"] in block, phase
         seen.add(protocol.PHASES[phase]["thinking"])
-    assert len(seen) == 5
+    assert len(seen) == len(protocol.PHASE_ORDER)
 
 
 def test_the_block_asks_whether_the_task_still_serves_the_core_question():
@@ -1659,14 +2055,14 @@ def test_the_phase_decides_the_shape_of_the_answer():
     findings is what the reader cannot use."""
     _fresh_topic("T-shape", "Q?")
     m = state.read_map("T-shape")
-    m["phase"] = "weighing"
+    m["phase"] = "synthesis"
     state.write_map("T-shape", m)
     block = protocol.build_research_block("T-shape", {"max_inject_chars": 2000})
-    assert "哪个解释现在更划算" in block
-    m["phase"] = "closing"
+    assert protocol.phase_output("synthesis") in block
+    m["phase"] = "converging"
     state.write_map("T-shape", m)
     block = protocol.build_research_block("T-shape", {"max_inject_chars": 2000})
-    assert "给出结论、它的强度" in block
+    assert protocol.phase_output("converging") in block
 
 
 def test_the_thinking_rules_include_trade_off():
@@ -1696,9 +2092,9 @@ def test_the_agent_can_set_the_standing_and_the_phase():
         },
         session_id="t-stand",
     )
-    assert "scoping" in str(out), out
+    assert "standing" in str(out), out
     assert state.read_goal("T-stand") == "把边界划清"
-    assert state.read_phase("T-stand") == "scoping"
+    assert state.read_phase("T-stand") == "standing"
     assert state.read_current_task("T-stand") == "列出可能的问题问法"
 
 
@@ -2792,16 +3188,15 @@ def test_an_open_phase_does_not_demand_a_position():
     # a per-answer footer said where the work stopped, not how it moved.
     assert out is None, out
 
-    # The same answer in a closing phase is a different answer: a
-    # conclusion with no position in it is not a conclusion.
-    m._tool_handler(
-        {"action": "set_state", "project": name, "phase": "closing"},
-        session_id="t-open",
-    )
+    # The same answer in a converging phase is a different answer: a
+    # conclusion with no position in it is not a conclusion. The phase is
+    # written directly here because this test is about the output check, not
+    # about the transition guards.
+    state.write_state(name, phase="converging")
     out2 = m._transform_llm_output(
         response_text=answer, session_id="t-open"
     )
-    assert out2 is not None, "a closing phase must demand a position"
+    assert out2 is not None, "a converging phase must demand a position"
 
 
 def test_the_open_phases_do_not_forbid_exploration():

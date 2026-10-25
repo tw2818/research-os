@@ -56,20 +56,43 @@ what happens next. A direction change has to be written down somewhere,
 not just felt — otherwise the next session reads the ledger and infers a
 direction that was never chosen.
 
-**The phase** changes how the agent thinks *and* what it hands back:
+**The station** changes how the agent thinks *and* what it hands back. The
+process is a tree, not a line: a review fans out into routes, closes them one
+at a time, and loops back.
 
-| phase | what it is for |
+| station | what it is for |
 |---|---|
-| `scoping` | frame the question, list the explanations that could compete |
-| `diverging` | look for a counterexample to the current frame, or a different way of asking |
-| `evidence` | go find material, keep it tied to a question |
-| `weighing` | decide between the explanations, say what separates them |
-| `closing` | stop adding, write the conclusion |
+| `standing` | confirm the state: core question, goal, what the project believes and why |
+| `diverging` | open routes — each one a branch — and say what would kill each |
+| `evidence` | go find material, external or already on disk, tied to a route |
+| `synthesis` | turn the evidence into understanding: which routes are still alive |
+| `converging` | make the choice: keep one, cut the rest, say what it costs |
+| `updating` | write the state back: Obsidian pages, Zotero collection, decision log |
 | `writing` | turn the conclusion into something a reader can take |
 
-Each phase also states what it is *not* for ("scoping does not go looking
-for evidence yet", "closing does not add any"), which is how a request
-belonging to another phase gets noticed.
+Each station also states what it is *not* for ("`standing` does not go
+looking for evidence yet", "`synthesis` does not add material", "`converging`
+adds nothing"), which is how a request belonging to another station gets
+noticed. Old names (`scoping`, `weighing`, `closing`) are translated on read,
+so a state file written by an earlier version keeps its history.
+
+**The tree is bounded, and the bounds are the point.** A route is a branch and
+a branch is a topic: it gets its own ledger, narrative and source list, so
+its evidence cannot leak into the parent's and the parent can always say which
+route a claim came from. `max_branches` (default 4) caps how many may be open
+at once, `max_branch_depth` (default 2) caps how far down the tree may go. A
+tree that can grow without a bound is not a review, it is a folder of
+beginnings.
+
+**A route has to say what it is for.** `branch` requires `why_relevant` — how
+this route serves the parent's core question — and closing one requires
+`contribution`: what it established, what it ruled out, what it left open. A
+branch closed without that was abandoned, not finished, and the parent would
+never know which.
+
+**Two stations cannot be left empty-handed.** Leaving `diverging` needs at
+least two routes open (one route is not divergence, it is claiming the first
+idea). Leaving `converging` needs a passed review gate — see below.
 
 **`diverging` exists because a project that only ever narrows settles
 into the first frame it found.** The phase asks for the counterexample
@@ -106,6 +129,53 @@ turns, and a per-turn counter resets exactly when it matters. The review
 interval is a setting: `review_every_searches` and `review_every_turns`
 in the config, and `review_every` in a topic's own map, because eight
 searches is most of a small topic and nothing on a large one.
+
+---
+
+## The review gate
+
+Every synthesis in this literature gets reviewed by someone who did not write
+it, and the verdict decides whether it goes out. Research OS had the phases
+but not that reader: the agent judged its own last move, always found that it
+advanced the project, and moved the station itself.
+
+`research_mode(action='gate', project=...)` calls a model that did not write
+this — through the host's `ctx.llm` facade, so the plugin never sees a key —
+hands it the standing (core question, narrative, plan, ledger, routes) rather
+than the last message, and asks for five scores plus blocking issues pinned to
+a specific claim, route or paragraph:
+
+| axis | the question |
+|---|---|
+| `alignment` | is this answering the core question, or a nearby question that is easier to answer |
+| `progression` | what is known now that was not known before; is each round standing on the last |
+| `grounding` | does the claim's strength match the ledger's evidence |
+| `convergence` | was a choice actually made, and was the cost of it said out loud |
+| `deliverable` | can a reader take a position away |
+
+Leaving `converging` for `updating` requires a `pass` or a `pass_with_caveat`.
+
+**Three decisions, each with a cost.**
+
+*A separate call, not a subagent.* A subagent is spawned by the agent being
+reviewed, so the gate would be an instruction ("go get reviewed") rather than
+a control, and the verdict would reach the state file as the agent's own
+report. A separate call is made by the plugin itself: it cannot be skipped,
+and what lands in the record is what the reviewer said.
+
+*The state, not the reply.* Judging one reply rewards a fluent paragraph. The
+material submitted is the standing — which is the thing that has to hold
+together.
+
+*The score is a signal, not a sentence.* Scores are not objective, and a gate
+that waits for a perfect score waits forever. `gate_pass_score` (default 7.0)
+is the line, `gate_max_rounds` (default 3) is the escape valve: after that
+many rounds the work goes through as `pass_with_caveat`, with the reason
+written into `gate-reviews.json` and rendered into the vault. A visible caveat
+beats a revision loop nobody escapes. A reviewer that cannot run at all is
+also a caveat, never a deadlock: blocking every project on an infrastructure
+failure is worse than letting it through with "nobody reviewed this" on the
+record.
 
 ---
 
@@ -192,6 +262,12 @@ A topic is one research question and the state that accumulates around it:
     review.json             reviews made, the last verdict, whether it is paused
     search-count.json       searches run on this topic, and how often it was interrupted
     sources.json            the literature library
+    branches.json          the routes this topic opened: route, why it
+                            serves the core question, status, the child topic
+                            it became, and what closing it contributed
+    gate-reviews.json      every review the gate made, with scores, blocking
+                            issues and the verdict, kept so a project waved
+                            through reads that way
     protocol.json          the plan, frozen before the searching starts:
                             the estimand, inclusion/exclusion, the primary
                             outcome, what would falsify the claim, and the
@@ -385,7 +461,15 @@ elsewhere.
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |
 | `literature_backend` | `auto` | `auto` uses a bibliography service if the agent has one, and files if it does not; `zotero` and `files` pin it |
 | `require_vault` | `false` | `true` makes a missing Obsidian vault an error instead of falling back to plain markdown |
-| `require_protocol` | `true` | in the `evidence` and `weighing` phases, refuse a literature search until the topic's plan is frozen with `action='protocol'` and `freeze=true` |
+| `require_protocol` | `true` | in the `evidence` and `synthesis` stations, refuse a literature search until the topic's plan is frozen with `action='protocol'` and `freeze=true` |
+| `require_gate` | `true` | refuse to leave `converging` for `updating` until the review gate has passed |
+| `gate_pass_score` | `7.0` | the average score that counts as a pass |
+| `gate_max_rounds` | `3` | after this many reviews the work goes through as `pass_with_caveat`, with the reason recorded |
+| `gate_max_tokens` | `32000` | the reviewer's output budget. A reasoning model spends most of it thinking; too small a budget comes back with an empty reply that looks like a gate failure |
+| `gate_model` | - | review with a different model than the one writing. Needs `plugins.entries.research-os.llm.allow_model_override`; a refused override falls back to the active model and the record says which was used |
+| `gate_provider` | - | the provider for `gate_model`; needs `allow_provider_override` |
+| `max_branches` | `4` | how many routes one topic may hold open at once |
+| `max_branch_depth` | `2` | how deep the route tree may go |
 | `notes_dir` | - | where the notes go when there is no vault (default: `<state home>/notes/`) |
 
 A topic can override the review interval in its own `research-map.json`
@@ -436,6 +520,10 @@ research_mode(action="delete", project="X")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
 research_mode(action="protocol", project="X", estimand="...",
               inclusion="A | B", falsifier="...", freeze=True)
+research_mode(action="branch", project="X", route="...", why_relevant="...")
+research_mode(action="branch", project="X", branch_id="B1",
+              branch_status="concluded", contribution="...")
+research_mode(action="gate", project="X", gate_reason="...")
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")
 research_mode(action="library", project="X")

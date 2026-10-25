@@ -183,6 +183,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # default: the notes fall back to plain markdown files, and a
     # renderer that refuses to render is a renderer nobody uses.
     "require_vault": False,
+    # Whether a literature search in the gathering phases is refused until
+    # the topic's plan is frozen. A plan written after the data arrived is a
+    # description of the data, so this is on by default.
+    "require_protocol": True,
+    # Whether the review gate has to pass before a project leaves 收敛 for
+    # 更新科研状态. Passing means: no blocking issue, and a score at or above
+    # `gate_pass_score`. `gate_max_rounds` is the escape valve - after that
+    # many reviews the project goes through with the caveat recorded, because
+    # a revision loop nobody escapes is worse than a written caveat.
+    "require_gate": True,
+    "gate_pass_score": 7.0,
+    "gate_max_rounds": 3,
+    # The reviewer's output budget. A reasoning model spends most of it
+    # thinking; too small a budget comes back empty, and an empty reply
+    # reads as "the gate failed" when it was the ceiling that failed.
+    "gate_max_tokens": 32000,
+    # The reviewer's model. Empty means the active model, which is also the
+    # model writing the work - set these to review with something else. Both
+    # need `plugins.entries.research-os.llm.allow_model_override` /
+    # `allow_provider_override` in config.yaml, and a refused override falls
+    # back to the active model with the fallback recorded in the review.
+    "gate_model": "",
+    "gate_provider": "",
+    # How many routes one topic may hold open at once, and how deep the tree
+    # may go. A tree that grows without a bound is not a review, it is a
+    # folder of beginnings.
+    "max_branches": 4,
+    "max_branch_depth": 2,
 }
 
 
@@ -1558,3 +1586,173 @@ def lock_protocol(topic: str, *, locked: bool = True, reason: str = "") -> dict[
     p["locked_at"] = now() if locked else None
     write_protocol(topic, p)
     return p
+
+
+# --------------------------------------------------------------------------
+# routes: a topic can hold several at once, and each one is a branch
+# --------------------------------------------------------------------------
+#
+# The old phase list assumed one direction at a time: narrow, then narrow
+# again. A review does not work that way. It fans out into routes - an
+# instrument question, a design question, a population question - closes them
+# one at a time, and only then has something to converge on.
+#
+# A route is a branch, and a branch is a topic, for one reason: it needs its
+# own ledger, its own narrative and its own source list, or its evidence leaks
+# into the parent's and the parent can no longer say which route a claim came
+# from. The parent keeps the register below - route, why it serves the core
+# question, whether it is still open, and what it contributed when it closed.
+#
+# The limits are the point. A tree that can grow without a bound is not a
+# review, it is a folder of beginnings; the breadth and depth caps force the
+# routes to be chosen rather than accumulated.
+
+BRANCH_FILE = "branches.json"
+
+BRANCH_STATUSES = ("open", "active", "concluded", "merged", "dropped")
+
+
+def branches_path(topic: str) -> Path:
+    return topic_dir(topic) / BRANCH_FILE
+
+
+def read_branches(topic: str) -> dict[str, Any]:
+    data = _read_json(branches_path(topic), {"branches": []})
+    if not isinstance(data, dict):
+        return {"branches": []}
+    if not isinstance(data.get("branches"), list):
+        data["branches"] = []
+    return data
+
+
+def write_branches(topic: str, data: dict[str, Any]) -> None:
+    _write_json(branches_path(topic), data)
+
+
+def list_branches(topic: str, *, status: str = "") -> list[dict[str, Any]]:
+    """Every route this topic opened, or only those in a given state."""
+    rows = [b for b in read_branches(topic).get("branches") or [] if isinstance(b, dict)]
+    if not status:
+        return rows
+    return [b for b in rows if str(b.get("status") or "") == status]
+
+
+def open_branches(topic: str) -> list[dict[str, Any]]:
+    return [
+        b for b in list_branches(topic)
+        if str(b.get("status") or "open") in ("open", "active")
+    ]
+
+
+def add_branch(topic: str, *, route: str, why: str, child: str = "") -> dict[str, Any]:
+    """Register a new route. The id is stable: contributions name it."""
+    data = read_branches(topic)
+    rows = [b for b in data.get("branches") or [] if isinstance(b, dict)]
+    used = {str(b.get("id") or "") for b in rows}
+    n = 1
+    while f"B{n}" in used:
+        n += 1
+    entry = {
+        "id": f"B{n}",
+        "route": str(route).strip(),
+        "why": str(why).strip(),
+        "status": "open",
+        "child": str(child or "").strip(),
+        "opened_at": now(),
+        "closed_at": None,
+        "contribution": "",
+        "verdict": "",
+    }
+    rows.append(entry)
+    data["branches"] = rows
+    write_branches(topic, data)
+    return entry
+
+
+def update_branch(topic: str, branch_id: str, **changes: Any) -> dict[str, Any]:
+    """Change one route's state, or an empty dict when there is no such route."""
+    data = read_branches(topic)
+    rows = [b for b in data.get("branches") or [] if isinstance(b, dict)]
+    hit: dict[str, Any] = {}
+    for row in rows:
+        if str(row.get("id") or "") == str(branch_id or "").strip():
+            for key, value in changes.items():
+                row[key] = value
+            if str(row.get("status") or "") in ("concluded", "merged", "dropped") and not row.get("closed_at"):
+                row["closed_at"] = now()
+            hit = row
+            break
+    if hit:
+        data["branches"] = rows
+        write_branches(topic, data)
+    return hit
+
+
+def branch_depth(topic: str, limit: int = 8) -> int:
+    """How deep in the tree this topic sits. 0 for a root topic.
+
+    The walk is bounded: a corrupted parent chain would otherwise loop
+    forever, and a state file that hangs the session is worse than a depth
+    that reads as deep as the limit.
+    """
+    depth = 0
+    seen = {topic}
+    current = topic
+    while depth < limit:
+        parent = str(read_map(current).get(MAP_PARENT) or "").strip()
+        if not parent or parent in seen or not topic_exists(parent):
+            break
+        seen.add(parent)
+        current = parent
+        depth += 1
+    return depth
+
+
+# --------------------------------------------------------------------------
+# the review gate: a reader who is not the writer, and who can say no
+# --------------------------------------------------------------------------
+#
+# A phase that only the writing agent can judge is not gated at all. The
+# review below is a real call to a model that did not write the work, given
+# the material and a rubric, and it is asked for the two things a vague
+# approval cannot give: the specific demands, and the specific place each
+# demand is about.
+#
+# Scores are not objective, and a gate that waits for a perfect score waits
+# forever. So the record keeps every attempt, the threshold is a setting, and
+# after `gate_max_rounds` the gate lets the work through with the caveat
+# written down - a visible caveat beats a revision loop nobody escapes.
+
+GATE_FILE = "gate-reviews.json"
+
+
+def gate_path(topic: str) -> Path:
+    return topic_dir(topic) / GATE_FILE
+
+
+def read_gate(topic: str) -> dict[str, Any]:
+    data = _read_json(gate_path(topic), {"reviews": []})
+    if not isinstance(data, dict):
+        return {"reviews": []}
+    if not isinstance(data.get("reviews"), list):
+        data["reviews"] = []
+    return data
+
+
+def append_gate_review(topic: str, record: dict[str, Any]) -> dict[str, Any]:
+    data = read_gate(topic)
+    rows = [r for r in data.get("reviews") or [] if isinstance(r, dict)]
+    rows.append(record)
+    data["reviews"] = rows[-50:]
+    data["round"] = len(rows)
+    write_gate(topic, data)
+    return data
+
+
+def write_gate(topic: str, data: dict[str, Any]) -> None:
+    _write_json(gate_path(topic), data)
+
+
+def last_gate_review(topic: str) -> dict[str, Any]:
+    rows = [r for r in read_gate(topic).get("reviews") or [] if isinstance(r, dict)]
+    return rows[-1] if rows else {}

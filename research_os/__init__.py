@@ -31,7 +31,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 
-def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
+def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any, Any]:
     """Load the implementation modules under a private namespace.
 
     Two problems this avoids.
@@ -59,7 +59,7 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
     mods: dict[str, Any] = {}
     # `state` first: `protocol` and `validate` import it at module level, so
     # it must exist in sys.modules before they are executed.
-    for short in ("state", "audit", "classify", "protocol", "validate"):
+    for short in ("state", "audit", "classify", "protocol", "validate", "reviewer"):
         full = f"{ns}.{short}"
         path = _HERE / f"{short}.py"
         # Drop any cached bytecode for this file first. A .pyc is validated
@@ -82,6 +82,7 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any]:
         mods["protocol"],
         mods["state"],
         mods["validate"],
+        mods["reviewer"],
     )
 
 
@@ -113,13 +114,14 @@ for _cached in Path(__file__).resolve().parent.glob("__pycache__/*.pyc"):
         pass
 
 try:
-    _audit, _classify, _protocol, _state, _validate = _load_impl_modules()
+    _audit, _classify, _protocol, _state, _validate, _reviewer = _load_impl_modules()
 except Exception:  # pragma: no cover - package layout (repo / tests)
     from . import audit as _audit  # type: ignore[no-redef]
     from . import classify as _classify  # type: ignore[no-redef]
     from . import protocol as _protocol  # type: ignore[no-redef]
     from . import state as _state  # type: ignore[no-redef]
     from . import validate as _validate  # type: ignore[no-redef]
+    from . import reviewer as _reviewer  # type: ignore[no-redef]
 
 # The implementation modules under their public names, so the repo's own
 # tests and scripts address the same modules the plugin runs. Without this,
@@ -130,6 +132,7 @@ classify = _classify
 protocol = _protocol
 state = _state
 validate = _validate
+reviewer = _reviewer
 
 
 # ---------------------------------------------------------------------------
@@ -164,15 +167,27 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'library' lists what the topic already has, so a source is not recorded twice. "
         "If there is no bibliography service available, use kind='file' with the path - the "
         "library still records it and the claim still cites it. "
+        "ACTION 'branch' opens or closes one route under a topic. A route is a branch "
+        "AND a topic: it gets its own ledger, narrative and sources, so its evidence "
+        "cannot leak into the parent's. Opening needs route + why_relevant (how it "
+        "serves the parent's core question) and obeys max_branches / max_branch_depth. "
+        "Closing needs branch_id + branch_status + contribution (what it established, "
+        "what it ruled out). "
+        "ACTION 'gate' runs the stage review: a separate model that did not write the work "
+        "reads the standing - core question, narrative, plan, ledger, routes - and scores "
+        "alignment / progression / grounding / convergence / deliverable, with blocking "
+        "issues pinned to a specific claim or route. Leaving 收敛 for 更新科研状态 needs a "
+        "verdict of pass or pass_with_caveat; after gate_max_rounds the gate lets the work "
+        "through with the caveat recorded. "
         "ACTION 'protocol' writes and freezes the plan: estimand (the quantity actually "
         "being estimated - not the question), inclusion / exclusion (separated by '|'), "
         "primary_outcome, falsifier (what result would show the claim wrong), and the "
         "Zotero collection the study searches and files against. freeze=true locks it, and "
-        "from then on a literature search in the evidence or weighing phase is refused "
+        "from then on a literature search in the evidence or synthesis phase is refused "
         "until the plan is frozen. Changing a frozen plan needs unfreeze_reason, and the "
         "previous contents are kept in its history. "
         "ACTION 'set_state' says where the project stands: 'goal' (what it is trying to get at), "
-        "'phase' (scoping | diverging | evidence | weighing | closing | writing - each phase calls for a "
+        "'phase' (standing | diverging | evidence | synthesis | converging | updating | writing - each station calls for a "
         "different way of thinking, and the phase changes how the next turn is worked on), and "
         "'current_task' (what is being done right now). ACTION 'set_state' also takes "
         "'core_question' to redefine the question this topic is answering, with "
@@ -201,7 +216,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "contradict", "question", "hypothesis", "map",
                     "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
-                    "protocol",
+                    "protocol", "branch", "gate",
                 ],
                 "description": "What to do.",
             },
@@ -309,6 +324,52 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "contents are kept in its history."
                 ),
             },
+            "route": {
+                "type": "string",
+                "description": (
+                    "For action 'branch': the route this branch takes - what it "
+                    "would test, in one sentence. A route is a way the core "
+                    "question could be answered, not a topic in its own right."
+                ),
+            },
+            "why_relevant": {
+                "type": "string",
+                "description": (
+                    "For action 'branch': how this route serves the parent's core "
+                    "question. Required, and it is the anti-drift control: a route "
+                    "that cannot say which part of the core question it addresses is "
+                    "a new project wearing a branch's clothes."
+                ),
+            },
+            "branch_id": {
+                "type": "string",
+                "description": (
+                    "For action 'branch': which route to update (B1, B2, ...). "
+                    "Omit to open a new one."
+                ),
+            },
+            "branch_status": {
+                "type": "string",
+                "enum": ["open", "active", "concluded", "merged", "dropped"],
+                "description": (
+                    "For action 'branch' with a branch_id: open / active while it is "
+                    "being worked, concluded / merged / dropped when it is done. "
+                    "Closing a route requires contribution."
+                ),
+            },
+            "contribution": {
+                "type": "string",
+                "description": (
+                    "For action 'branch' when closing one: what this route "
+                    "contributed to the parent - what it established, what it ruled "
+                    "out, what it left open. A branch closed without this is a branch "
+                    "that was abandoned, not one that was finished."
+                ),
+            },
+            "gate_reason": {
+                "type": "string",
+                "description": "For action 'gate': why the review is being run now.",
+            },
             "question_reason": {
                 "type": "string",
                 "description": (
@@ -390,8 +451,12 @@ TOOL_SCHEMA: dict[str, Any] = {
             "phase": {
                 "type": "string",
                 "description": (
-                    "For action 'set_state': which phase the project is in. One of "
-                    "scoping | evidence | weighing | closing | writing. The phase "
+                    "For action 'set_state': which station the project is in. One of "
+                    "standing | diverging | evidence | synthesis | converging | updating | writing. "
+                    "standing confirms the state with the user, diverging opens routes as branches, "
+                    "evidence gathers, synthesis turns evidence into understanding, converging "
+                    "makes the choice (and needs a passed gate to leave), updating writes the state "
+                    "back to Obsidian and Zotero. The phase "
                     "decides how the next turn thinks: scoping frames the question, "
                     "evidence gathers against a stated expectation, weighing pits the "
                     "explanations against each other, closing calibrates the strength "
@@ -663,6 +728,21 @@ def _expand_source(project: str, claim: dict[str, Any]) -> dict[str, Any]:
 
 
 _CTX: Any = None       # the PluginContext, kept for host-side posting
+
+
+def _llm() -> Any:
+    """The host's LLM facade, or None when there is none.
+
+    The review gate calls a model that did not write the work, and a plugin
+    can only do that through the host: `ctx.llm` carries the routing, the
+    auth and the trust policy, so no key ever reaches this code. When the
+    facade is missing - an older host, a test harness - the gate records that
+    it did not run instead of pretending it passed.
+    """
+    try:
+        return getattr(_CTX, "llm", None)
+    except Exception:
+        return None
 _LAST_NOTICE = ""      # the last line posted; the same line twice is not a transition
 
 
@@ -744,6 +824,24 @@ def _notify_transitions(before: dict[str, Any], args: dict[str, Any], raw: str) 
         verdict = str(args.get("verdict") or "")
         note = " ".join(str(args.get("review_note") or args.get("note") or "").split())
         _notify(f"科研 · {topic} · 审查 {verdict}：{note[:70]}")
+    elif action == "branch" and topic:
+        row = payload.get("branch") or {}
+        if str(args.get("branch_id") or "").strip():
+            _notify(
+                f"科研 · {topic} · 路线 {row.get('id')} → {row.get('status')}"
+                f"（开着 {payload.get('open_branches')} 条）"
+            )
+        else:
+            route = str(row.get("route") or "")[:36]
+            _notify(
+                f"科研 · {topic} · 新路线 {row.get('id')}：{route}"
+                f"（开着 {payload.get('open_branches')} 条）"
+            )
+    elif action == "gate" and topic:
+        verdict = str(payload.get("verdict") or "")
+        total = payload.get("total")
+        mark = {"pass": "放行", "revise": "要改", "pass_with_caveat": "带 caveat 放行"}.get(verdict, verdict)
+        _notify(f"科研 · {topic} · 审稿 {mark}（{total}/10，第 {payload.get('round')} 轮）")
 
 
 def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
@@ -1181,6 +1279,186 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 }
             )
 
+        if action == "branch":
+            # A route under a topic. Routes are branches and branches are
+            # topics, because a route without its own ledger has nowhere to
+            # keep what it found, and the parent ends up holding evidence it
+            # cannot attribute to any route.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            cfg = _state.load_config()
+            branch_id = str(args.get("branch_id") or "").strip()
+            contribution = " ".join(str(args.get("contribution") or "").split())
+            status = str(args.get("branch_status") or "").strip().lower()
+
+            if branch_id:
+                row = next(
+                    (b for b in _state.list_branches(project)
+                     if str(b.get("id") or "") == branch_id),
+                    None,
+                )
+                if not row:
+                    ids = [str(b.get("id") or "") for b in _state.list_branches(project)]
+                    return fail(
+                        f"「{project}」没有 {branch_id} 这条路线。现有的：" + ("、".join(ids) or "（无）")
+                    )
+                if status and status not in _state.BRANCH_STATUSES:
+                    return fail("branch_status 只能是：" + "、".join(_state.BRANCH_STATUSES))
+                closing = status in ("concluded", "merged", "dropped")
+                if closing and not contribution:
+                    return fail(
+                        f"收掉 {branch_id} 必须给 contribution：它确立了什么、排除了什么、"
+                        f"留下什么没解决。不写贡献就收掉，等于放弃而不是走完。"
+                    )
+                changes: dict[str, Any] = {}
+                if status:
+                    changes["status"] = status
+                if contribution:
+                    changes["contribution"] = contribution
+                updated = _state.update_branch(project, branch_id, **changes)
+                return ok({
+                    "topic": project,
+                    "branch": updated,
+                    "open_branches": len(_state.open_branches(project)),
+                    "next": (
+                        "这条路线收好了。回到父课题做收敛：把它的贡献写进父课题的叙事，"
+                        "然后跑一次 gate。"
+                        if closing else "路线状态已更新。"
+                    ),
+                })
+
+            route = " ".join(str(args.get("route") or "").split())
+            why = " ".join(str(args.get("why_relevant") or "").split())
+            if not route:
+                return fail("route 必填：这条路给自己定的是什么问题。")
+            if not why:
+                return fail(
+                    "why_relevant 必填：这条路线服务核心问题的哪一面？"
+                    "说不出这一层的，是想开一个新课题，不是开分支。"
+                )
+            open_now = _state.open_branches(project)
+            cap = max(1, int(cfg.get("max_branches") or 4))
+            if len(open_now) >= cap:
+                ids = "、".join(f"{b.get('id')}（{str(b.get('route') or '')[:24]}）" for b in open_now)
+                return fail(
+                    f"「{project}」已经有 {len(open_now)} 条路线开着（{ids}），上限 {cap}。"
+                    f"先收掉一条再开新的：同时追五条路线，没有一条会走完。"
+                )
+            depth = _state.branch_depth(project)
+            max_depth = max(0, int(cfg.get("max_branch_depth") or 2))
+            if depth >= max_depth:
+                return fail(
+                    f"「{project}」已经在树的第 {depth} 层，上限 {max_depth} 层。"
+                    f"再往下分支就是碎片化，结论回不到核心问题。"
+                )
+            child = f"{project}-B{len(_state.list_branches(project)) + 1}"
+            if not _state.topic_exists(child):
+                try:
+                    _state.create_topic(child, core_question=route)
+                except Exception as exc:  # noqa: BLE001
+                    return fail(f"建分支课题失败：{exc}")
+                _state.write_state(child, parent=project, goal=why, phase="standing")
+            entry = _state.add_branch(project, route=route, why=why, child=child)
+            return ok({
+                "topic": project,
+                "branch": entry,
+                "child_topic": child,
+                "open_branches": len(_state.open_branches(project)),
+                "next": (
+                    f"路线 {entry['id']} 注册了，对应课题 {child}。"
+                    f"要查的东西在 {child} 里查，账本分开记；"
+                    f"这条路走完了用 branch 带上 branch_id 和 contribution 收掉。"
+                ),
+            })
+
+        if action == "gate":
+            # The stage review. A separate call to a model that did not write
+            # this, because an agent reviewing its own last move always finds
+            # that it advanced the project.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            cfg = _state.load_config()
+            m = _state.read_map(project)
+            parent = _state.read_parent(project)
+            claims = _state.read_claims(project)
+            branches = _state.list_branches(project)
+            brief = _reviewer.build_brief(
+                project,
+                core_question=str(m.get("core_question") or ""),
+                goal=str(m.get("goal") or ""),
+                phase=_protocol.phase_name(str(m.get("phase") or "")),
+                narrative=str(m.get("narrative") or ""),
+                plan=str(m.get("plan") or ""),
+                current_task=str(m.get("current_task") or ""),
+                claims=claims,
+                branches=branches,
+                open_questions=[str(q) for q in (m.get("open_questions") or [])],
+                parent=str(parent.get("name") or ""),
+            )
+            reviews = _state.read_gate(project).get("reviews") or []
+            round_no = len(reviews) + 1
+            llm = _llm()
+            if llm is None:
+                record = {
+                    "at": _state.now(),
+                    "topic": project,
+                    "round": round_no,
+                    "scores": {},
+                    "total": 0.0,
+                    "blocking": [],
+                    "summary": "",
+                    "verdict": "pass_with_caveat",
+                    "why": "宿主没有提供 ctx.llm，这一轮没有真正被审过。",
+                    "llm_ok": False,
+                    "error": "no ctx.llm facade",
+                }
+            else:
+                record = _reviewer.run(
+                    project,
+                    llm=llm,
+                    brief=brief,
+                    round_no=round_no,
+                    pass_score=float(cfg.get("gate_pass_score") or 7.0),
+                    max_rounds=int(cfg.get("gate_max_rounds") or 3),
+                    model=str(cfg.get("gate_model") or ""),
+                    provider=str(cfg.get("gate_provider") or ""),
+                    max_tokens=int(cfg.get("gate_max_tokens") or 8000),
+                )
+            reason = " ".join(str(args.get("gate_reason") or "").split())
+            if reason:
+                record["reason"] = reason
+            _state.append_gate_review(project, record)
+            payload: dict[str, Any] = {
+                "topic": project,
+                "verdict": record["verdict"],
+                "why": record["why"],
+                "round": round_no,
+                "scores": record.get("scores"),
+                "total": record.get("total"),
+                "summary": record.get("summary"),
+                "blocking_issues": record.get("blocking"),
+                "model": record.get("model") or "",
+            }
+            if record.get("error"):
+                payload["error_note"] = record["error"]
+            if record["verdict"] == "revise":
+                payload["must_fix"] = _reviewer.demands_text(record)
+                payload["next"] = (
+                    "按 must_fix 逐条改，改完再跑一次 gate。"
+                    f"这是第 {round_no} 轮，{cfg.get('gate_max_rounds')} 轮之后会带着记录放行。"
+                )
+            else:
+                payload["next"] = (
+                    "过了这一站的审稿，可以推进到 更新科研状态 了。"
+                    if record["verdict"] == "pass"
+                    else "带着 caveat 放行——记录里写清了为什么，接着往下走。"
+                )
+            return ok(payload)
+
         if action == "protocol":
             # The plan, frozen before the searching starts. Every synthesis in
             # this literature fixes its inclusion criteria, its primary
@@ -1275,7 +1553,7 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
             ):
                 return fail(
                     "give at least one of: goal (what this project is trying "
-                    "to get at), phase (scoping/evidence/weighing/closing/"
+                    "to get at), phase (standing/diverging/evidence/synthesis/converging/updating/"
                     "writing), current_task (what is being done right now), "
                     "narrative (what we currently believe and why it changed), "
                     "plan (what happens next), parent (the top topic this one "
@@ -1286,12 +1564,63 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     "(what was looked for outside the current frame)"
                 )
             if phase is not None:
-                key = str(phase).strip()
-                if key not in _protocol.PHASES:
+                # Old names are translated, not refused: a topic named
+                # `weighing` yesterday is in `synthesis` today, and the caller
+                # that still says `weighing` is not wrong, just early.
+                key = _protocol.normalize_phase(phase)
+                if not key:
                     return fail(
-                        f"unknown phase {key!r}. Phases: "
-                        + ", ".join(sorted(_protocol.PHASES))
+                        f"unknown phase {str(phase)!r}. Phases: "
+                        + " | ".join(_protocol.PHASE_ORDER)
                     )
+                phase = key
+                # Two stations can only be left when the work they were for
+                # is actually there. The checks are here, at the move, because
+                # a phase change is the one moment the agent declares the work
+                # done: later is too late to ask.
+                current_phase = _protocol.normalize_phase(_state.read_phase(project))
+                cfg_gate = _state.load_config()
+                if current_phase == "diverging" and key != "diverging":
+                    routes = _state.list_branches(project)
+                    if len(routes) < 2:
+                        return fail(
+                            f"发散阶段要至少两条路线才能往外走，现在有 {len(routes)} 条。"
+                            f"一条路线不叫发散，叫认领了第一个想法。\n"
+                            f"先用 branch 开路线：route（这条路检验什么）+ why_relevant"
+                            f"（它服务核心问题的哪一面），开两条以上再推进。"
+                        )
+                if (
+                    current_phase == "converging"
+                    and key in ("updating", "writing")
+                    and cfg_gate.get("require_gate", True)
+                ):
+                    last = _state.last_gate_review(project)
+                    if not last:
+                        return fail(
+                            f"「{project}」还没有过审稿。收敛这一站要交给审稿人看一眼才能往下写："
+                            f"research_mode(action='gate', project='{project}', "
+                            f"gate_reason='<为什么现在审>')。\n"
+                            f"审的是：有没有围绕核心问题、有没有层层推进、结论和证据对不对得上、"
+                            f"有没有真的做取舍。"
+                        )
+                    if str(last.get("verdict") or "") == "revise":
+                        return fail(
+                            f"审稿没过（第 {last.get('round')} 轮，{last.get('total')}/10）。先把问题改掉：\n"
+                            f"{_reviewer.demands_text(last)}\n"
+                            f"改完再跑一次 gate。"
+                        )
+                    # A review only clears the move it was run for: if the
+                    # work moved on after it, the verdict is about an older
+                    # state and does not carry.
+                    cur = _state.read_map(project)
+                    if (
+                        str(last.get("verdict") or "") == "pass"
+                        and float(last.get("at") or 0) < float(cur.get("updated_at") or 0)
+                    ):
+                        return fail(
+                            "上一次审稿之后状态又改过了，那次审的是更早的版本。"
+                            "重跑一次 gate 再往下写。"
+                        )
             before = _state.read_phase(project)
             m = _state.write_state(
                 project,
@@ -2010,6 +2339,26 @@ _STATE_IMPORT_HINTS = (
 )
 
 
+def _looks_like_source_edit(text: str) -> bool:
+    """True when a command is editing the plugin's own source.
+
+    The API check below matches on text, and the plugin's source contains the
+    very call names it looks for - `state.write_map`, `write_claims` - so
+    editing this file was blocked by the guard that lives in this file. A
+    guard that cannot tell "writing the ledger" from "editing the code that
+    writes the ledger" stops the maintenance it depends on, and the person
+    hitting it learns to route around the guard instead of respecting it.
+
+    The path check above still applies to `write_file`/`patch`: a write into
+    the state tree is blocked whatever else the command says.
+    """
+    lowered = text.lower()
+    editing = "patch(" in lowered or "write_file(" in lowered or "old_string=" in lowered
+    if not editing:
+        return False
+    return "research-os/" in lowered or "research_os/" in lowered or "/plugins/research-os" in lowered
+
+
 def _calls_state_writer(text: str) -> bool:
     """True when a command reaches the state module's writer by API.
 
@@ -2053,6 +2402,8 @@ def _mentions_state_tree(text: str) -> bool:
     tool.
     """
     if not text:
+        return False
+    if _looks_like_source_edit(text):
         return False
     if _calls_state_writer(text):
         return True
@@ -2379,7 +2730,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             # a gate there would block the work it exists to protect.
             if (
                 _state.load_config().get("require_protocol", True)
-                and str(_state.read_map(topic).get("phase") or "") in ("evidence", "weighing")
+                and _protocol.normalize_phase(_state.read_map(topic).get("phase") or "")
+                in ("evidence", "synthesis")
                 and not _state.protocol_locked(topic)
             ):
                 return {"action": "block", "message": _protocol_block_message(topic)}

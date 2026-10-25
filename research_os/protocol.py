@@ -27,6 +27,8 @@ try:
         read_parent,
         read_review,
         read_siblings,
+        list_branches,
+        last_gate_review,
     )
 except ImportError:
     try:
@@ -37,6 +39,8 @@ except ImportError:
             read_parent,
             read_review,
             read_siblings,
+            list_branches,
+            last_gate_review,
         )
     except ImportError:  # loaded flat inside the Hermes plugin directory
         from state import (  # type: ignore[no-redef]
@@ -46,111 +50,124 @@ except ImportError:
             read_parent,
             read_review,
             read_siblings,
+            list_branches,
+            last_gate_review,
         )
 
-# The phases of a research project, and what thinking each one calls for.
+# The stations of a research project, and what thinking each one calls for.
 #
-# A project moves through these, and the way of thinking changes with them.
-# Scoping a question, opening the frame up to rival readings, gathering
-# evidence, weighing rival explanations, and writing up are different jobs,
-# and an agent that uses the same method for all of them will gather evidence
-# while it should be deciding what to ask, or write while it should be
-# arguing with itself.
+# The old list ran in one direction and that was the flaw: a review does not
+# narrow from start to finish, it fans out into routes and closes them one at
+# a time. The stations below are a loop, not a line - 发散 opens routes, 收敛
+# closes one, 更新 writes the state back, and the next round starts again from
+# whichever station the work is actually at.
 #
-# The diverging phase is the one that stops the list from being all
-# narrowing. Everything else tightens the frame; nothing in it ever asks
-# whether the frame is the right one. An agent that only ever narrows
-# settles into the first frame it found and then defends it, and the
-# narrowing looks like progress the whole way. So the frame gets a phase of
-# its own, and what that phase produces is not a conclusion but a lead:
-# another way of asking, and the observation that would tell the two
-# readings apart. The lead goes back to evidence to be checked, not
-# straight to closing.
-#
-# The phase is the agent's own: it moves the phase when the work moves, and
-# the switch is a tool call, not a guess made by the hook.
+# The other flaw the old list had: nothing in it ever asked whether a route
+# was worth opening at all, or whether the routes were still answering the
+# core question. Once a project can hold several routes, something has to
+# hold them to the question, and that is what 收敛 and the review gate are for.
 PHASES: dict[str, dict[str, str]] = {
-    "scoping": {
-        "name": "界定问题",
+    "standing": {
+        "name": "确认科研状态",
         "strictness": "open",
         "thinking": (
-            "这轮在界定问题，别急着找证据。要回答的科学问题是什么？"
-            "为什么这个答案会有用？有哪些可能的问题问法？选哪个，代价是什么？"
-            "什么答案会让你改变问法？"
+            "这轮在确认科研状态，先不找证据。新课题：把核心问题、目标、"
+            "为什么值得问、答案会是什么样子，和用户谈清楚再往下走。"
+            "老课题：先确认状态有没有变——问题还是不是那个问题，"
+            "上一轮留下的话还算不算数。"
         ),
         "output": (
-            "给出你选定的问法，以及放弃其他问法的代价。"
+            "给出这一轮的核心问题、目标，以及你目前相信什么、凭什么。"
         ),
         "gate": (
-            "这一阶段不要急着找证据。先把问题问准——"
-            "如果用户这轮给的是一个具体任务，先问它服务的是哪个问法。"
+            "这一阶段不找证据，也不铺路线。核心问题还没和用户对齐就往下推，"
+            "后面每一站都是白做。"
         ),
     },
     "diverging": {
-        "name": "放开框架",
+        "name": "发散路线",
         "strictness": "open",
         "thinking": (
-            "这轮在放开框架。主动找当前框架的反例：什么材料会推翻现在的说法？"
-            "有没有完全不同的问法？哪些材料是被当前框架当成理所当然、但其实没验证过的？"
-            "别急着替现在的说法找补——反例都被解释掉，可能是框架太松，不是证据太硬。"
+            "这轮在铺路线。一个核心问题下面能走的路不止一条：列出几条可能的研究路线，"
+            "每条写成一条分支（用 branch 开），说清它服务核心问题的哪一面、"
+            "查什么能把它否掉。路线要开得开，但每一条都得还站在核心问题上——"
+            "跟核心问题无关的分支不是发散，是跑题。"
         ),
         "output": (
-            "给出候选的新框架或新问法，以及能把它和当前框架分开的那个判据（材料、检验或推理都行）。"
+            "给出这几条路线，每条一句：要检验什么、怎么否掉、什么时候算走完。"
         ),
         "gate": (
-            "这一阶段不收口。发散出来的是值得去查的线索，不是结论——"
-            "查完回 evidence 阶段去查。"
-            "但不必为了不收口而把自己削平：大胆提一个明确标记的假说，"
-            "哪怕现在只有弱支持；被否掉的想法也是进展。"
+            "这一阶段不选路，也不收口，只铺路；但铺出来的每条路都要能指出"
+            "它和核心问题的关系。至少两条，少于两条就是在赌第一个想法。"
         ),
     },
     "evidence": {
-        "name": "搜集证据",
+        "name": "找证据",
         "strictness": "mixed",
         "thinking": (
-            "这轮在搜集证据。带着具体问题去找，别漫无目的地捞文献："
-            "要找的证据能支持或否定哪个说法？找之前先说清你要看到什么。"
-            "不同来源的结论冲突时，先想清楚它们测的是不是同一件事。"
+            "这轮在找证据，外部文献或本地已有材料都行。"
+            "每份材料都要挂在某条路线上：它在检验哪条路线的哪个预测？"
+            "和路线无关的材料记成旁支，不要混进主线账本。"
+            "证据回来之后，先看它有没有把某条路线削弱——没削弱任何一条，"
+            "说明这批材料没有判据。"
         ),
         "output": (
-            "给出这批证据支持什么、不支持什么，一句话结论。"
+            "给出这批证据支持哪条路线、削弱哪条、还不确定哪条。"
         ),
         "gate": (
             "这一阶段以找证据为主，但结论和改问题都没有被禁止："
             "证据已经指向一个答案时直接说，被证据推翻了的问题就改掉——"
             "用 set_state 带上 core_question 和 question_reason，旧问法会留痕。"
-            "找之前先说清你要看到什么。"
         ),
     },
-    "weighing": {
-        "name": "权衡解释",
+    "synthesis": {
+        "name": "梳理理解",
         "strictness": "mixed",
         "thinking": (
-            "这轮在权衡解释。看哪个预测被证实、哪个被削掉。"
-            "注意：证据不支持某个解释，和证据支持另一个解释，是两回事——"
-            "后者需要正面证据。如果两个解释都能解释同一批数据，那说明还缺一个判据。"
+            "这轮在梳理理解。不是把材料再摆一遍，而是把它们变成理解："
+            "哪几条路线还活着、哪条被削掉了、剩下的分歧到底分歧在哪里、"
+            "还缺哪一个判据才能分开。路线之间的冲突要先确认它们测的是不是同一件事。"
         ),
         "output": (
-            "给出哪个解释现在更划算、哪个被削掉了、依据是什么。"
+            "给出现在的理解：哪条路线还活着、为什么、还缺什么。"
         ),
         "gate": (
-            "这一阶段做取舍：不必把所有材料都摆出来，"
-            "挑最能改变判断的那几条。"
+            "这一阶段不新增材料。梳理要靠已经进账的证据，"
+            "缺证据就回 evidence 去补，不要在这里顺手编。"
         ),
     },
-    "closing": {
-        "name": "收束结论",
+    "converging": {
+        "name": "收敛",
         "strictness": "tight",
         "thinking": (
-            "这轮在收束。结论能说到多强？逐条检查依据够不够。"
-            "哪里是推测，哪里是事实，哪里连方向都不确定——分开写。"
-            "什么新证据会推翻这个结论？如果没有，那这个结论就不牢靠。"
+            "这轮在收敛，真的做取舍：留哪条路线、砍掉哪条、代价是什么、"
+            "什么新证据会翻案。砍掉的要说清凭什么砍，不能只因为它不好写。"
+            "如果这一站收的是一条分支，结论要写回父课题（branch 带上 contribution）——"
+            "分支不写回，父课题就只是攒了一堆没消化的材料。"
         ),
         "output": (
-            "给出结论、它的强度、以及在什么条件下不成立。"
+            "给出一句能带走的话：现在的判断是什么、强到哪里、什么条件下不成立。"
         ),
         "gate": (
-            "这一阶段不要新增证据。结论要改，先说清哪条证据会改它。"
+            "这一阶段要决断，不要把所有材料都摆出来。"
+            "收完之后走一次审稿（gate），过了才往下写状态。"
+        ),
+    },
+    "updating": {
+        "name": "更新科研状态",
+        "strictness": "tight",
+        "thinking": (
+            "这轮把状态写回去：Obsidian 的页、Zotero 的集合、决策日志、"
+            "下一轮的计划。数字、引用、结论强度都要和账本对得上——"
+            "写回去的状态就是下一轮的起点，写错了下一轮从错的地方开始。"
+        ),
+        "output": (
+            "给出更新了什么、哪些没写进去、下一轮从哪一站接着走。"
+        ),
+        "gate": (
+            "这一阶段不加新论证，只把已有的写回去。"
+            "写不进去的用 open_questions 记下来，别留在对话里。"
+            "更新完可以回到发散或找证据，迭代不是一次走完的。"
         ),
     },
     "writing": {
@@ -169,43 +186,65 @@ PHASES: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT_PHASE = "weighing"
+DEFAULT_PHASE = "synthesis"
+
+# The stations in order. A project does not have to walk them in one
+# direction - the loop re-enters wherever the work actually is - but the
+# order is what "moving on" means when a phase is asked to advance.
+PHASE_ORDER = (
+    "standing", "diverging", "evidence", "synthesis", "converging", "updating", "writing",
+)
+
+# What this vocabulary used to be. A topic written by an older version names
+# its phase with one of these, and a state file that stops loading because the
+# words changed is a state file that loses its own history.
+PHASE_ALIASES = {
+    "scoping": "standing",
+    "weighing": "synthesis",
+    "closing": "converging",
+}
 
 # How hard each phase pushes toward a stated position.
 #
-# The evidence discipline is the floor and it never moves: a claim with
-# no source is not a claim, whatever the phase. What changes is how hard
-# the answer is pushed to commit.
-#
-# The reason is the failure this project was built against. A model
-# that must always have a position answers an open question with a
-# position - so the exploration stage produces conclusions nobody
-# checked, and the narrowing stage has nothing left to narrow. The
-# discipline has to be staged too, or it enforces the same shape at
-# every moment of a project whose moments are not the same.
+# The evidence discipline is the floor and it never moves: a claim with no
+# source is not a claim, whatever the phase. What changes is how hard the
+# answer is pushed to commit.
 #
 # "open"  - the phase is for possibilities. A position is not required,
-#           and naming a speculative direction is the point.
+#           and naming a speculative route is the point.
 # "mixed" - the phase weighs what is there. A position is expected, but
 #           the answer may still say what it does not know.
 # "tight" - the phase commits. A position is required, and its strength
 #           is checked against the ledger.
 PHASE_STRICTNESS = {
-    "scoping": "open",
+    "standing": "open",
     "diverging": "open",
     "evidence": "mixed",
-    "weighing": "mixed",
-    "closing": "tight",
+    "synthesis": "mixed",
+    "converging": "tight",
+    "updating": "tight",
     "writing": "tight",
 }
 
 
+def normalize_phase(phase: str) -> str:
+    """A phase name this file still knows, or empty.
+
+    Old names are translated rather than rejected: a topic that was in
+    `weighing` yesterday is in `synthesis` today, and it should not lose its
+    state to a rename.
+    """
+    key = str(phase or "").strip()
+    key = PHASE_ALIASES.get(key, key)
+    return key if key in PHASES else ""
+
+
 def phase_strictness(phase: str) -> str:
     """How hard this phase pushes toward a stated position."""
-    entry = PHASES.get(str(phase or "").strip())
+    entry = PHASES.get(normalize_phase(phase))
     key = str(entry.get("strictness") or "") if entry else ""
     if not key:
-        key = PHASE_STRICTNESS.get(str(phase or "").strip(), "mixed")
+        key = PHASE_STRICTNESS.get(normalize_phase(phase), "mixed")
     return key or "mixed"
 
 
@@ -215,18 +254,15 @@ def phase_name(phase: str) -> str:
     Empty when no phase has been set yet: a new topic has none until the
     agent sets one, and that is a healthy state, not a missing one.
     """
-    key = str(phase or "").strip()
+    key = normalize_phase(phase)
     if not key:
         return ""
-    entry = PHASES.get(key)
-    return str(entry.get("name") or key) if entry else key
+    return str(PHASES[key].get("name") or key)
 
 
 def phase_thinking(phase: str) -> str:
     """The thinking instruction for a phase, with its name."""
-    entry = PHASES.get(str(phase or "").strip())
-    if not entry:
-        entry = PHASES[DEFAULT_PHASE]
+    entry = PHASES.get(normalize_phase(phase)) or PHASES[DEFAULT_PHASE]
     return f"当前阶段：{entry['name']}\n{entry['thinking']}"
 
 
@@ -240,7 +276,7 @@ def phase_gate(phase: str) -> str:
     boundary in the phase is more reliable than guessing at it from
     outside.
     """
-    entry = PHASES.get(str(phase or "").strip()) or PHASES[DEFAULT_PHASE]
+    entry = PHASES.get(normalize_phase(phase)) or PHASES[DEFAULT_PHASE]
     return str(entry.get("gate") or "")
 
 
@@ -252,7 +288,7 @@ def phase_output(phase: str) -> str:
     will produce a list of findings with no position in it, and a list of
     findings is what the reader cannot use.
     """
-    entry = PHASES.get(str(phase or "").strip()) or PHASES[DEFAULT_PHASE]
+    entry = PHASES.get(normalize_phase(phase)) or PHASES[DEFAULT_PHASE]
     return str(entry.get("output") or "")
 
 
@@ -431,6 +467,57 @@ def _qtext(q: Any) -> str:
                 return v
         return ""
     return str(q or "").strip()
+
+
+def _routes(topic: str) -> list[str]:
+    """The routes this topic holds, and where each one stands.
+
+    A tree is only readable if the register travels with it: without this,
+    the agent sees the core question and a pile of claims and cannot tell
+    which route a claim belongs to — or that a route it opened last week is
+    still open and unattended.
+    """
+    try:
+        rows = list_branches(topic)
+    except Exception:
+        return []
+    if not rows:
+        return []
+    open_rows = [b for b in rows if str(b.get("status") or "open") in ("open", "active")]
+    done_rows = [b for b in rows if b not in open_rows]
+    out: list[str] = [
+        f"路线：{len(rows)} 条（开着 {len(open_rows)}）："
+        + " ｜ ".join(
+            f"{b.get('id')}[{b.get('status')}] {_short(b.get('route'), 40)}" for b in rows
+        )
+    ]
+    for b in open_rows[:3]:
+        out.append(
+            f"- {b.get('id')} 服务核心问题：{_short(b.get('why'), 60)}"
+        )
+    for b in done_rows[-2:]:
+        contribution = _short(b.get("contribution"), 60)
+        if contribution:
+            out.append(f"- {b.get('id')} 已收束，贡献：{contribution}")
+    if len(open_rows) > 2:
+        out.append("（同时开着三条以上路线时，先收掉一条再开新的。）")
+    # The gate's last word, in the phase that has to earn its way past it.
+    phase = ""
+    last: dict[str, Any] = {}
+    try:
+        phase = str(read_map(topic).get("phase") or "")
+        last = last_gate_review(topic)
+    except Exception:
+        last = {}
+    if last and normalize_phase(phase) in ("converging", "updating", "writing"):
+        verdict = str(last.get("verdict") or "")
+        label = {"pass": "已放行", "revise": "未过", "pass_with_caveat": "带 caveat 放行"}.get(verdict, verdict)
+        out.append(
+            f"审稿：第 {last.get('round')} 轮 {label}（{last.get('total')}/10）"
+            + (f"，还没改的：{_short((last.get('blocking') or [{}])[0].get('problem'), 50)}"
+               if verdict == "revise" else "")
+        )
+    return out
 
 
 def _frame(topic: str, m: dict[str, Any] | None = None) -> list[str]:
@@ -663,6 +750,11 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
     # phase and the current task are what the turn is for; the evidence is
     # what the turn works with.
     lines.extend(_standing(topic))
+    # The routes come right after the standing: a project holding several
+    # routes cannot be read from its core question alone. Which routes are
+    # open, which closed and what each contributed is the part of the state
+    # that says whether this is still one project or has quietly become five.
+    lines.extend(_routes(topic))
     # A review that was asked for and not made is a debt, and it goes above
     # the situation: while it is outstanding the agent's own method is
     # withheld, so continuing in the old frame is not one of the options.

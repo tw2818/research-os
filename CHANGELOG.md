@@ -54,6 +54,53 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.8.0] — 2026-10-25
+
+- **The reviewer needs a large output budget, and finds out the hard way.**
+  The first four live runs came back with an empty reply: `usage` showed
+  `output=8000` against `max_tokens=8000`, i.e. a reasoning model spending the
+  whole budget thinking and writing nothing. A blank reply reads as "the gate
+  failed" when it was the ceiling that failed, so `gate_max_tokens` is 32000
+  by default and the record keeps `usage` and `reply_chars` to tell the two
+  apart. A provider that accepts the schema and ignores it is covered by the
+  plain-completion path, JSON parsed out of the text.
+
+- **The process is a tree, not a line.** Six stations instead of one-way
+  phases: 确认科研状态 / 发散路线 / 找证据 / 梳理理解 / 收敛 / 更新科研状态
+  (plus 成文表达, kept for the draft). The old names translate on read, so
+  a topic written under the old vocabulary keeps its history.
+- **A route is a branch and a branch is a topic.** `branch` opens one, with
+  `why_relevant` required — how it serves the parent's core question — and it
+  becomes a child topic with its own ledger, so its evidence cannot leak into
+  the parent's. `max_branches` (4) and `max_branch_depth` (2) bound the tree:
+  a tree that grows without a bound is a folder of beginnings, not a review.
+- **Closing a route costs a contribution.** What it established, what it
+  ruled out, what it left open. A branch closed without that was abandoned,
+  not finished.
+- **Two stations cannot be left empty-handed.** Leaving 发散 needs two open
+  routes; leaving 收敛 needs a passed review gate.
+- **The review gate.** `action='gate'` calls a model that did not write the
+  work — through the host's `ctx.llm` facade, so no key reaches the plugin —
+  and hands it the standing rather than the last reply. Five axes (alignment /
+  progression / grounding / convergence / deliverable), scores, and blocking
+  issues pinned to a specific claim or route. Leaving 收敛 for 更新科研状态
+  needs `pass` or `pass_with_caveat`.
+- **What reviewed the work, and how it was decided.** A subagent is spawned
+  by the agent under review, so it would have been an instruction rather than
+  a control; a separate call cannot be skipped. `gate_pass_score` (7.0) is the
+  line, `gate_max_rounds` (3) is the escape valve — after that the work goes
+  through with the caveat in `gate-reviews.json` and in the vault, because a
+  revision loop nobody escapes is worse than a written caveat. A reviewer that
+  cannot run is also a caveat, never a deadlock.
+- **The ledger guard stops blocking source maintenance.** It matched call
+  names in the text, and the plugin's own source contains them, so editing
+  `state.write_map` was refused by the guard that lives beside it. A guard
+  that cannot tell "writing the ledger" from "editing the code that writes the
+  ledger" teaches the person hitting it to route around it.
+- **The vault gains the routes and the reviews**: `## 路线（分支）` on the map
+  page, and `02-审稿记录.md` with scores, blocking issues and every earlier
+  round.
+
 ## [0.7.0] — 2026-10-25
 
 - **The plan is frozen before the searching starts.** The phases went from

@@ -112,11 +112,17 @@ CONTRA_STATUS_LABEL = {
 # copy here means an unknown phase name still renders as something a reader
 # can act on.
 _FALLBACK_PHASE_NAMES = {
-    "scoping": "界定问题",
-    "evidence": "搜集证据",
-    "weighing": "权衡解释",
-    "closing": "收束结论",
+    "standing": "确认科研状态",
+    "diverging": "发散路线",
+    "evidence": "找证据",
+    "synthesis": "梳理理解",
+    "converging": "收敛",
+    "updating": "更新科研状态",
     "writing": "成文表达",
+    # Names an older state file may still carry.
+    "scoping": "确认科研状态",
+    "weighing": "梳理理解",
+    "closing": "收敛",
 }
 _STRENGTH_LADDER = ("descriptive", "suggestive", "strong", "established")
 _SETTLED_STATUSES = ("verified", "derived", "established")
@@ -127,6 +133,7 @@ PROTOCOL_FILE = "00-研究方案.md"
 MAP_FILE = "00-课题地图.md"
 VIEW_FILE = "00-当前认知.md"
 LEDGER_FILE = "01-证据账本.md"
+REVIEWS_FILE = "02-审稿记录.md"
 DECISIONS_FILE = "02-决策与转向.md"
 NOTES_DIRNAME = "notes"
 
@@ -888,6 +895,103 @@ def _render_protocol(topic: str, proto: dict, *, obsidian: bool) -> str:
     return "\n".join(lines)
 
 
+def _render_routes(topic: str, *, obsidian: bool) -> str:
+    """The routes this topic opened, and what closing each one produced.
+
+    On the map's page rather than a page of its own: a reader who cannot see
+    the routes cannot tell whether this is one project or five that share a
+    folder, and that is the failure the tree model was meant to make visible.
+    """
+    rows = _safe(lambda: state.list_branches(topic), [])
+    lines: list[str] = ["## 路线（分支）", ""]
+    if not rows:
+        lines += ["还没有开路线。发散阶段至少开两条，每条要说清它服务核心问题的哪一面。", ""]
+        return "\n".join(lines)
+    for b in rows:
+        status = str(b.get("status") or "open")
+        label = {"open": "进行中", "active": "进行中", "concluded": "已收束",
+                 "merged": "已并入", "dropped": "已放弃"}.get(status, status)
+        line = f"- **{b.get('id')}**（{label}）{b.get('route') or ''}"
+        child = str(b.get("child") or "").strip()
+        if child and obsidian:
+            line += f" → {_note_link(obsidian, child)}"
+        lines.append(line)
+        why = str(b.get("why") or "").strip()
+        if why:
+            lines.append(f"  - 服务核心问题：{why}")
+        contribution = str(b.get("contribution") or "").strip()
+        if contribution:
+            lines.append(f"  - 收束贡献：{contribution}")
+    open_count = len([b for b in rows if str(b.get("status") or "open") in ("open", "active")])
+    lines += ["", f"开着 {open_count} 条，共 {len(rows)} 条。", ""]
+    return "\n".join(lines)
+
+
+def _render_reviews(topic: str, *, obsidian: bool) -> str:
+    """Every attempt the review gate saw, in order.
+
+    Kept because the verdict alone is not the useful part: a project that was
+    waved through after three rounds should read that way to whoever opens it,
+    and a project that passed clean should not look the same.
+    """
+    data = _safe(lambda: state.read_gate(topic), {"reviews": []})
+    rows = [r for r in (data.get("reviews") or []) if isinstance(r, dict)]
+    lines: list[str] = [f"# 审稿记录 · {topic}", ""]
+    if not rows:
+        lines += [
+            "还没有审过。收敛结束、往更新科研状态走之前，要过一次审稿"
+            "（`research_mode(action='gate', project=...)`）。",
+            "",
+        ]
+        return "\n".join(lines)
+
+    last = rows[-1]
+    verdict = str(last.get("verdict") or "")
+    label = {"pass": "放行", "revise": "退回修改", "pass_with_caveat": "带 caveat 放行"}.get(verdict, verdict)
+    total = last.get("total")
+    lines += [
+        f"最近一次：第 {last.get('round')} 轮，**{label}**，总分 {total}/10。",
+        "",
+        f"理由：{last.get('why') or ''}",
+        "",
+    ]
+    if not last.get("llm_ok"):
+        lines += [f"这一轮没有真正审：{last.get('error') or ''}", ""]
+    summary = str(last.get("summary") or "").strip()
+    if summary:
+        lines += ["## 审稿人意见", "", summary, ""]
+    blocking = [b for b in (last.get("blocking") or []) if isinstance(b, dict)]
+    if blocking:
+        lines += ["## 卡住的问题", ""]
+        for b in blocking:
+            lines.append(f"- **{b.get('axis')}**：{b.get('problem')}")
+            if b.get("where"):
+                lines.append(f"  - 位置：{b.get('where')}")
+            if b.get("fix"):
+                lines.append(f"  - 怎么改：{b.get('fix')}")
+        lines.append("")
+
+    scores = last.get("scores") or {}
+    if isinstance(scores, dict) and scores:
+        dims = {
+            "alignment": "围绕核心问题", "progression": "层层推进", "grounding": "证据匹配",
+            "convergence": "收束质量", "deliverable": "可交性",
+        }
+        lines += ["## 五个维度", ""]
+        for key, label_cn in dims.items():
+            lines.append(f"- {label_cn}：{scores.get(key, '—')}/10")
+        lines.append("")
+
+    if len(rows) > 1:
+        lines += ["## 历次", ""]
+        for r in rows[:-1]:
+            v = str(r.get("verdict") or "")
+            mark = {"pass": "放行", "revise": "退回", "pass_with_caveat": "带 caveat 放行"}.get(v, v)
+            lines.append(f"- 第 {r.get('round')} 轮（{_fmt_ts(r.get('at'))}）：{mark}，{r.get('total')}/10")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def render_topic(
     topic: str,
     out_dir: Path,
@@ -937,8 +1041,26 @@ def render_topic(
     p = out_dir / PROTOCOL_FILE
     _w(p, _render_protocol(topic, proto, obsidian=obsidian))
     written.append(p)
+    # The routes belong on the map, right after the plan: the plan says what
+    # the project committed to, the routes say which parts of it are being
+    # worked and which were closed with what.
+    p = out_dir / MAP_FILE
+    try:
+        existing = p.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    if existing and "## 路线（分支）" not in existing:
+        _w(p, existing.rstrip("\n") + "\n\n" + _render_routes(topic, obsidian=obsidian))
+    elif not existing:
+        _w(p, _render_routes(topic, obsidian=obsidian))
     if map_only:
         return written
+
+    # The reviews. Kept as a page rather than a field: a project waved
+    # through after three rounds should read that way to whoever opens it.
+    p = out_dir / REVIEWS_FILE
+    _w(p, _render_reviews(topic, obsidian=obsidian))
+    written.append(p)
 
     # ------------------------------------------------------- 00 current view
     # The reader's first question is "what do we currently think", not "what
@@ -957,7 +1079,8 @@ def render_topic(
     # is a page that says what the project knows.
     lines += [
         f"课题地图：{_note_link(obsidian, MAP_FILE[:-3])} · "
-        f"研究方案：{_note_link(obsidian, PROTOCOL_FILE[:-3])}",
+        f"研究方案：{_note_link(obsidian, PROTOCOL_FILE[:-3])} · "
+        f"审稿记录：{_note_link(obsidian, REVIEWS_FILE[:-3])}",
         "",
     ]
 

@@ -462,7 +462,12 @@ def _activity_key(turn_id: str) -> str:
 
 
 def note_tool_activity(
-    session_id: str, turn_id: str, tool_name: str, is_evidence: bool, is_ledger: bool
+    session_id: str,
+    turn_id: str,
+    tool_name: str,
+    is_evidence: bool,
+    is_ledger: bool,
+    is_move: bool = False,
 ) -> None:
     s = read_session(session_id)
     turns = s.get("turn_activities")
@@ -471,12 +476,18 @@ def note_tool_activity(
     key = _activity_key(turn_id)
     activity = turns.get(key)
     if not isinstance(activity, dict):
-        activity = {"evidence": 0, "ledger": 0, "tools": []}
+        activity = {"evidence": 0, "ledger": 0, "moves": 0, "tools": []}
         turns[key] = activity
     if is_evidence:
         activity["evidence"] = int(activity.get("evidence") or 0) + 1
     if is_ledger:
         activity["ledger"] = int(activity.get("ledger") or 0) + 1
+    # A research move is a write that moves the question forward, as opposed
+    # to a write that only records what was already known. It is the
+    # difference between "the agent wrote down the ledger" and "the agent
+    # did research".
+    if is_move:
+        activity["moves"] = int(activity.get("moves") or 0) + 1
     tools = activity.setdefault("tools", [])
     if len(tools) < 40:
         tools.append(tool_name)

@@ -1131,8 +1131,44 @@ def test_research_block_contains_core_question_and_rules():
     _fresh_topic("T-p1", "Why does cognition lag mood?")
     block = protocol.build_research_block("T-p1", {"max_inject_chars": 900})
     assert "Why does cognition lag mood?" in block
-    assert "observation" in block and "inference" in block
+    # The block must carry the thinking moves, not the claim format. The
+    # format lives in the tool description; repeating it here cost 70% of
+    # the budget and taught the agent to fill a form instead of think.
+    assert "竞争解释" in block
+    assert "陷阱" in block
     assert "T-p1" in block
+
+
+def test_research_block_is_more_thinking_than_formatting():
+    """The proportion that decides what the mode produces.
+
+    A mode whose injection is mostly rules produces bookkeeping: the agent
+    fills the ledger and stops. A mode whose injection is mostly thinking
+    produces research. This test exists so the balance cannot silently slide
+    back.
+    """
+    _fresh_topic("T-balance", "Q?")
+    block = protocol.build_research_block("T-balance", {"max_inject_chars": 1200})
+    thinking = len(protocol.THINKING_RULES) + len(protocol.TURN_DEMAND)
+    formatting = len(protocol.CLAIM_RULES) + len(protocol.SCOPE_RULE)
+    assert thinking > formatting * 1.4, (thinking, formatting)
+
+
+def test_research_block_carries_the_situation_not_just_the_hypothesis_list():
+    """What the topic looks like right now, and what would move it - not a
+    list of what someone wrote down once."""
+    _fresh_topic("T-situation", "Q?")
+    state.write_contradictions("T-situation", {
+        "items": [{
+            "title": "残留状态说",
+            "separator": "在残留症状为零的亚组里缺损是否仍在",
+            "status": "contested",
+        }],
+        "updated_at": state.now(),
+    })
+    block = protocol.build_research_block("T-situation", {"max_inject_chars": 1200})
+    assert "残留状态说" in block
+    assert "残留症状为零" in block
 
 
 def test_research_block_respects_cap():
@@ -1155,6 +1191,15 @@ def test_research_block_truncation_keeps_claim_instruction():
     block = protocol.build_research_block("T-p4", {"max_inject_chars": 500})
     assert len(block) <= 500
     assert "claim" in block
+
+
+def test_research_block_truncation_keeps_the_thinking_whole():
+    """A half-list of moves is worse than no list. The thinking rules are
+    cut as a block, never mid-rule."""
+    _fresh_topic("T-p5", "Q" * 3000)
+    block = protocol.build_research_block("T-p5", {"max_inject_chars": 900})
+    assert "找陷阱" in block
+    assert "允许答案是" in block
 
 
 def test_bundled_observation_and_conclusion_is_split():

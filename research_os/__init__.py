@@ -151,8 +151,11 @@ TOOL_SCHEMA: dict[str, Any] = {
         "inference/hypothesis) and ACTION 'validate' checks the ledger. "
         "ACTION 'contradict' records a competing explanation and what evidence would "
         "separate it (title + separator — a contradiction with no way to resolve it is "
-        "just a worry). ACTION 'question' records an open question. ACTION 'map' "
-        "updates the research map (core_question, hypotheses, tags, open_questions). "
+        "just a worry). ACTION 'question' records an open question, and closes one when "
+        "given 'closed' (the question being closed) plus 'question' (what answered it). "
+        "ACTION 'hypothesis' puts an untested idea on the table — proposing one is "
+        "research, so it has its own action rather than being bent into a claim. "
+        "ACTION 'map' updates the research map (core_question, hypotheses, tags, open_questions). "
         "Call 'on' when the user asks why something happens, whether evidence can "
         "separate explanations, for a literature review, for a hypothesis, or when a "
         "claim needs verification. Do NOT call for chores: file conversion, imports, "
@@ -165,7 +168,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "enum": [
                     "on", "off", "status", "list", "create", "switch",
-                    "contradict", "question", "map",
+                    "contradict", "question", "hypothesis", "map",
                     "delete", "claim", "validate", "repair",
                 ],
                 "description": "What to do.",
@@ -210,7 +213,26 @@ TOOL_SCHEMA: dict[str, Any] = {
             },
             "question": {
                 "type": "string",
-                "description": "For action 'question': an open question that is still unresolved.",
+                "description": (
+                    "For action 'question': an open question that is still unresolved. "
+                    "With 'closed' set, this is instead what answered the closed question."
+                ),
+            },
+            "closed": {
+                "type": "string",
+                "description": (
+                    "For action 'question': the open question being closed. Closing a "
+                    "question is a research act, not housekeeping — the answer goes in "
+                    "'question' and the closed one stops being open."
+                ),
+            },
+            "hypothesis": {
+                "type": "string",
+                "description": (
+                    "For action 'hypothesis': the untested idea being proposed. It needs "
+                    "no source — that is what makes it a hypothesis — but it does need to "
+                    "be stated as a claim about the world that could turn out to be wrong."
+                ),
             },
             "open_questions": {
                 "type": "string",
@@ -240,8 +262,21 @@ TOOL_SCHEMA: dict[str, Any] = {
                             "Example: 'L1 L2'."
                         ),
                     },
-                    "source": {"type": "string", "description": "PMID/DOI/paper (observation/report)."},
-                    "status": {"type": "string"},
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "PMID/DOI/paper. Required for observation (read in the "
+                            "original) and report (abstract-level check is enough)."
+                        ),
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": (
+                            "verified | derived | open | pending. A claim whose "
+                            "source has not been checked yet is 'pending', not "
+                            "'verified'."
+                        ),
+                    },
                     "note": {"type": "string"},
                 },
                 "required": ["kind", "content"],
@@ -500,7 +535,10 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
 
         if action == "question":
             # An open question: what is still unresolved. Recording it is the
-            # only way the next session can pick it up.
+            # only way the next session can pick it up. Closing one is
+            # equally a research act - a question that was answered stops
+            # being open, and leaving it open forever makes the map read as
+            # permanently unsure.
             if not project:
                 return fail("project is required")
             text = str(args.get("question") or "").strip()
@@ -511,9 +549,44 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             if text not in questions:
                 questions.append(text)
             m["open_questions"] = questions
+            closed = str(args.get("closed") or "").strip()
+            if closed:
+                # Close a question by giving the answer that closed it.
+                m["open_questions"] = [q for q in questions if q != closed]
+                resolved = list(m.get("resolved_questions") or [])
+                entry = {"question": closed, "answer": text}
+                if entry not in resolved:
+                    resolved.append(entry)
+                m["resolved_questions"] = resolved
             m["updated_at"] = _state.now()
             _state.write_map(project, m)
-            return ok({"open_question": text, "count": len(questions)})
+            return ok(
+                {
+                    "open_question": text,
+                    "count": len(m["open_questions"]),
+                    "closed": closed or None,
+                }
+            )
+
+        if action == "hypothesis":
+            # A hypothesis is not a claim: it has no source and is not yet
+            # true, but proposing one is the thing research does. It gets
+            # its own action so the agent does not have to bend it into a
+            # claim with a missing source, and so the ledger can show what
+            # was speculated separately from what was found.
+            if not project:
+                return fail("project is required")
+            text = str(args.get("hypothesis") or args.get("content") or "").strip()
+            if not text:
+                return fail("hypothesis is required: what is the untested idea")
+            m = _state.read_map(project)
+            hyps = list(m.get("hypotheses") or [])
+            if text not in hyps:
+                hyps.append(text)
+            m["hypotheses"] = hyps
+            m["updated_at"] = _state.now()
+            _state.write_map(project, m)
+            return ok({"hypothesis": text, "count": len(hyps)})
 
         if action == "map":
             # Update the research map: the hypotheses, the tags, the core
@@ -613,6 +686,12 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             gap = _accounting_note(topic, previous_activity)
             if gap:
                 ctx = f"{ctx}\n\n{gap}"
+            # The turn that just ended may have recorded without moving. Say
+            # so, so the next turn is asked for a move rather than more
+            # bookkeeping.
+            stalled = _no_movement_note(topic, previous_activity)
+            if stalled:
+                ctx = f"{ctx}\n\n{stalled}"
             # The map has competing explanations but nothing separating them,
             # or has judgments but no record of what is still open. The
             # protocol block is capped, so this goes in only when there is
@@ -696,6 +775,7 @@ def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
     recording it. Empty string when there is nothing to say."""
     evidence = int(activity.get("evidence") or 0)
     ledger = int(activity.get("ledger") or 0)
+    moves = int(activity.get("moves") or 0)
     if evidence == 0 or ledger > 0:
         return ""
     what = f"{evidence} 次检索" if evidence > 1 else "一次检索"
@@ -706,6 +786,34 @@ def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
         f"动笔前先用 research_mode(action='claim', project='{topic}', claim={{...}}) "
         f"把用到的证据记进去：观察和转述要填 source（PMID/DOI），"
         f"推论要填 premises 和 inference_type，假设标成 hypothesis。"
+    )
+
+
+def _no_movement_note(topic: str, activity: dict[str, Any]) -> str:
+    """Say that the last turn did not move the question.
+
+    The protocol asked for a move and the turn ended without one. Nothing
+    about that is an error - the agent may have had nothing new to add, or
+    may have been answering a question the topic does not need to track. But
+    a research session that repeatedly ends where it started is a research
+    session that is summarising, and that is worth one sentence.
+    """
+    if not activity:
+        return ""
+    moves = int(activity.get("moves") or 0)
+    ledger = int(activity.get("ledger") or 0)
+    evidence = int(activity.get("evidence") or 0)
+    if moves > 0:
+        return ""
+    if evidence == 0 and ledger == 0:
+        return ""
+    return (
+        f"[Research OS · 上一轮没有推进]\n"
+        f"上一轮{evidence} 次检索、{ledger} 条断言，但没有一条是推进："
+        f"没有新解释、没有区分证据、没有关掉的问题。\n"
+        f"这轮先想清楚要动哪一处——用 research_mode(action='contradict', "
+        f"project='{topic}', title='<哪个解释>', separator='<什么证据能区分>') "
+        f"提出或改写一个竞争解释，或用 action='question' 关掉一个待解问题。"
     )
 
 
@@ -1045,12 +1153,20 @@ def _post_tool_call(**kwargs: Any) -> None:
         # one is not the same act, and counting them would make a turn that
         # never wrote a claim look accounted for.
         is_ledger = tool_name == "research_mode" and _is_claim_call(kwargs.get("args"))
+        # A research move is a write that changes what the topic knows, as
+        # opposed to a write that adds a fact to the ledger. Recording a
+        # report is a move only if it settles or shifts something. The
+        # actions that move a question forward are: a new or sharpened
+        # explanation, the evidence that separates two of them, a closed
+        # question, and a hypothesis (an untested idea is itself a move).
+        is_move = tool_name == "research_mode" and _is_move_call(kwargs.get("args"))
         _state.note_tool_activity(
             session_id,
             turn_id=turn_id,
             tool_name=tool_name,
             is_evidence=tool_name in _audit.EVIDENCE_TOOLS,
             is_ledger=is_ledger,
+            is_move=is_move,
         )
         if tool_name in _audit.EVIDENCE_TOOLS:
             s = _state.read_session(session_id)
@@ -1071,6 +1187,37 @@ def _is_claim_call(args: Any) -> bool:
         return False
     claim = args.get("claim")
     return isinstance(claim, dict) and bool(claim.get("content"))
+
+
+def _is_move_call(args: Any) -> bool:
+    """True when a research_mode call moved the question forward.
+
+    Not every write is a move. Adding a report to the ledger records what is
+    known; proposing a new explanation, saying what would tell two
+    explanations apart, or closing a question changes what the topic is
+    about. A hypothesis counts - putting an untested idea on the table is
+    what research does.
+    """
+    if not isinstance(args, dict):
+        return False
+    action = str(args.get("action") or "").lower()
+    if action in ("contradict", "question", "hypothesis"):
+        return True
+    if action == "claim":
+        claim = args.get("claim")
+        if not isinstance(claim, dict):
+            return False
+        kind = str(claim.get("kind") or "").lower()
+        if kind == "hypothesis":
+            return True
+        # An inference is a move when it draws on the ledger: it is the
+        # agent's own reasoning, not a transcription. A report is a move
+        # only when it comes with the reading that settles something.
+        if kind == "inference":
+            return bool(claim.get("premises"))
+        if kind == "report":
+            return bool(claim.get("implies") or claim.get("settles"))
+    return False
 
 
 def _transform_llm_output(**kwargs: Any) -> str | None:

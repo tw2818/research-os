@@ -469,11 +469,37 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
         if action == "status":
             s = _state.read_session(session_id)
             topics = _state.list_topics()
-            return ok({
+            out: dict[str, Any] = {
                 "mode": s.get("mode", "idle"),
                 "topic": s.get("topic", ""),
                 "topics": [t["name"] for t in topics],
-            })
+            }
+            # With a project, the question is "what state is this topic
+            # in", not "what mode is this session in". Without this the
+            # answer was the session's, which is idle for any caller that
+            # is not in a session - so an agent asking about a topic got
+            # an answer about nothing, and went to read the files
+            # instead.
+            if project:
+                if not _state.topic_exists(project):
+                    return fail(f"no such topic: {project}")
+                m = _state.read_map(project)
+                out["project"] = {
+                    "name": project,
+                    "core_question": str(m.get("core_question") or ""),
+                    "goal": str(m.get("goal") or ""),
+                    "phase": str(m.get("phase") or ""),
+                    "current_task": str(m.get("current_task") or ""),
+                    "narrative": str(m.get("narrative") or ""),
+                    "plan": str(m.get("plan") or ""),
+                    "claims": len(_state.read_claims(project)),
+                    "contradictions": len(
+                        (_state.read_contradictions(project) or {}).get("items") or []
+                    ),
+                    "reviews": _state.read_review(project).get("reviews", 0),
+                    "paused": _state.topic_is_paused(project),
+                }
+            return ok(out)
 
         if action == "list":
             topics = _state.list_topics()

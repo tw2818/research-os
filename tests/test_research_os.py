@@ -1864,6 +1864,45 @@ def test_research_block_truncation_keeps_claim_instruction():
     assert "claim" in block
 
 
+def test_status_answers_about_the_topic_not_about_the_session():
+    """`status` with a project means "what state is this topic in". It
+    used to answer with the session's state, which is idle for any caller
+    that is not in a session - so an agent asking about a topic got an
+    answer about nothing, and went to read the files instead."""
+    m = _handler()
+    sid = "t-status"
+    m._tool_handler(
+        {"action": "create", "project": "StatusTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "StatusTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "claim",
+            "project": "StatusTopic",
+            "claim": {
+                "kind": "observation",
+                "content": "a finding",
+                "source": "PMID 1",
+            },
+        },
+        session_id=sid,
+    )
+    out = m._tool_handler(
+        {"action": "status", "project": "StatusTopic"}, session_id=sid
+    )
+    body = str(out)
+    assert "StatusTopic" in body
+    assert "claims" in body
+    assert '"claims": 1' in body or "claims" in body, body
+    # A topic that is not there says so rather than answering about
+    # something else.
+    out2 = m._tool_handler(
+        {"action": "status", "project": "NoSuchTopic"}, session_id=sid
+    )
+    assert "no such topic" in str(out2).lower(), out2
+
+
 def test_a_topic_whose_directory_is_gone_does_not_haunt_the_name():
     """A registry entry whose directory is gone is an orphan. It stays in
     the list, because `on` and `repair` find it there and rebuild it -

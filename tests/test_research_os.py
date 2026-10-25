@@ -152,7 +152,7 @@ def test_hypothesis_cannot_be_marked_verified():
 def test_hypothesis_phrased_as_fact_is_error():
     _fresh_topic("T-v8")
     state.append_claim("T-v8", {
-        "kind": "hypothesis", "content": "已证实控制环路独立于情绪",
+        "kind": "hypothesis", "content": "已证实记忆巩固过程独立于清醒时长",
     })
     r = validate_claims("T-v8")
     assert any(e["code"] == "overclaim_phrasing" for e in r["errors"]), r
@@ -700,7 +700,7 @@ def test_contradict_records_a_contradiction_with_its_separator():
     import json
     out = json.loads(m._tool_handler(
         {"action": "contradict", "project": "ContraTopic",
-         "title": "缺损来自环路本身", "separator": "控制情绪后的执行功能差异是否仍存在"},
+         "title": "评分下降来自记忆巩固本身", "separator": "控制情绪后的记忆评分差异是否仍存在"},
         session_id=sid,
     ))
     assert "contradiction" in out
@@ -960,13 +960,13 @@ def test_transform_llm_output_asks_for_a_position_when_there_is_none():
         session_id=sid,
         response_text=(
             "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。"
-            "另外 Smith 2019 的队列研究表明工作记忆容量在抑郁中显著下降。"
+            "另外 Petrov 2020 的队列研究表明再认记忆容量在睡眠剥夺后显著下降。"
         ),
     )
     assert out is not None
     assert "没给判断" in out
     # The answer is not rewritten and the findings are not listed back.
-    assert "Smith 2019" not in out.split("---")[-1]
+    assert "Petrov 2020" not in out.split("---")[-1]
 
 
 def test_transform_llm_output_quiet_when_there_is_a_position():
@@ -1065,7 +1065,7 @@ def test_audit_injection_reaches_the_turn():
 BG_NOTICE = (
     "[IMPORTANT: Background process proc_4dcbcef35a86 completed normally (exit code 0).\n"
     "Command: cd /home/twebery && nohup timeout 900 hermes chat --oneshot -Q -q "
-    '"为什么睡眠剥夺会损伤陈述性记忆？现有证据能区分「控制环路本身异常」'
+    '"为什么睡眠剥夺会损伤陈述性记忆？现有证据能区分「编码受损」与「巩固受损」'
     '和「情绪干扰占用资源」这两种解释吗？"\n'
     "Output:\nstarted"
 )
@@ -1153,7 +1153,7 @@ def test_real_turn_search_is_blocked_without_a_topic():
     sid = "t-real"
     m._pre_llm_call(
         session_id=sid,
-        user_message="证据能区分控制环路异常和情绪干扰吗？",
+        user_message="证据能区分记忆巩固受损和编码受损吗？",
         turn_id="turn-1",
     )
     out = m._pre_tool_call(
@@ -1614,8 +1614,8 @@ def test_the_position_check_reads_the_moves_not_a_word_list():
         assert audit.has_position(text) is True, text
     for text in (
         "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。",
-        "Smith 2019 的队列研究表明工作记忆容量在抑郁中显著下降。",
-        "这两项研究都测了工作记忆容量。",
+        "Petrov 2020 的队列研究表明再认记忆容量在睡眠剥夺后显著下降。",
+        "这两项研究都测了再认记忆容量。",
         "相关性见 Table 2，p < 0.05。",
         "文件已转换完毕，输出在 /tmp/out.pdf。",
     ):
@@ -2028,7 +2028,7 @@ def test_pure_observation_is_not_flagged_as_bundled():
     _fresh_topic("T-bundle2")
     state.append_claim("T-bundle2", {
         "kind": "observation",
-        "content": "Wang 2016 meta-analysis found moderate executive function deficits in after sleep deprivation",
+        "content": "Wang 2016 meta-analysis found moderate declarative memory deficits after sleep deprivation",
         "source": "PMID 10000001",
     })
     r = validate_claims("T-bundle2")

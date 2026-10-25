@@ -203,9 +203,9 @@ First working version.
 - **Bundled-claim detection** — a claim that carries both an observation and
   the conclusion drawn from it is flagged, with the split point identified and
   the rewrite suggested. This is the failure the ledger exists to catch, and
-  the first end-to-end run produced it: "Remitted MDD retains objective
-  cognitive deficits, so depression-related cognitive impairment cannot be
-  reduced to concurrent emotional state", filed as a `report`.
+  the first end-to-end run produced it: "In the trial cohort the event rate
+  was lower in the treated arm, so the treatment prevents the outcome
+  rather than delaying it", filed as a `report`.
 - **`repair` action** — rebuilds topic state that went missing while the
   registry still lists the topic.
 - **State rebuild on `on`** — entering a topic whose state directory is gone
@@ -255,19 +255,18 @@ First working version.
 
 ### Verified end-to-end
 
-A live run against PubMed: the agent named its own topic
-(`Wang 2016 the topic it opened meta-analysis`), wrote four claims
-with the correct kinds — a `report` for the study itself, two
-`observation`s carrying effect sizes, an `inference` with `premises L1 L2 L3`
-— then found a second paper and recorded it as L5 with PMID and DOI, `pending`.
-In the answer it labelled observations and inferences inline and flagged the
-print-year versus online-year discrepancy itself.
+A live run against PubMed: the agent named its own topic from the paper it
+was reading, wrote four claims with the correct kinds — a `report` for the
+study itself, two `observation`s carrying effect sizes, an `inference` with
+`premises L1 L2 L3` — then found a second paper and recorded it as L5 with
+PMID and DOI, `pending`. In the answer it labelled observations and
+inferences inline and flagged the print-year versus online-year discrepancy
+itself.
 
 The output check then caught the one thing the agent said in prose but did
-not record: the sentence about late-onset deficits implying vascular and
-neurodegenerative factors. That sentence is in the answer and not in the
-ledger, so nothing had checked whether it was an observation or an
-inference.
+not record: a sentence that named a subgroup effect and then attributed it
+to a mechanism. That sentence is in the answer and not in the ledger, so
+nothing had checked whether it was an observation or an inference.
 
 76 tests.
 

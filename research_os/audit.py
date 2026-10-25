@@ -174,11 +174,49 @@ _POSITION_MARKERS = (
     "overall", "our best", "points to", "argues for",
 )
 
+# The signals of a conclusion, as opposed to a finding. A sentence that
+# opens with one of these is drawing the thread together rather than
+# reporting what a paper said. The marker list alone was not enough: it
+# missed "综上，残余缺损以累积损伤为主", which is plainly a position and
+# carries none of the words in it.
+#
+# Enumerating markers is a losing game - the set of ways to take a
+# position is open. The structural signals below are closed.
+_CONCLUSION_SIGNALS = (
+    "综上", "总体", "总的来说", "总的说来", "就现有", "据此", "所以",
+    "因此", "于是", "可见", "可以看出", "换句话说", "也就是说",
+    "更可能", "更支持", "不太可能", "最可能", "更能解释", "最划算",
+    "我倾向", "我认为", "我判断", "我的判断", "据此判断",
+    "taken together", "overall", "in short", "our best",
+)
+
+# The verbs of a scientific verdict. These are the moves a researcher makes
+# about a claim: it is supported, it is undermined, it is ruled out. A
+# sentence carrying one of them has taken a position on the claim, which
+# is what this check is looking for.
+_VERDICT_VERBS = (
+    "否定", "排除", "证伪", "推翻", "削掉", "削弱", "证实", "确证",
+    "支持", "不支持", "不足以", "不能说明", "无法区分", "不能区分",
+    "已不成立", "站不住",
+    "rules out", "ruled out", "refutes", "refuted", "disconfirms",
+    "supports", "does not support", "undermines", "rules for",
+)
+
 # Markers of a hedge with no position behind it: the sentence gives the
 # reader nothing to hold.
 _HEDGE_ONLY = (
     "有待进一步研究", "需要更多研究", "尚需进一步", "未来需要",
     "仍需进一步验证", "有待验证", "尚不清楚", "有待进一步确认",
+)
+
+
+# Sentences that look like a position and are not one. "这可能说明 X，需要
+# 更多研究" names what might be going on and then declines to stand behind
+# it, which is the shape this check exists to catch, not to accept.
+_NO_POSITION = (
+    "需要更多研究", "有待进一步研究", "仍需进一步验证", "有待验证",
+    "尚需进一步确认", "有待进一步确认", "需进一步研究",
+    "更多研究来", "进一步研究来", "需要进一步",
 )
 
 
@@ -190,12 +228,25 @@ def has_position(text: str) -> bool:
     report: every point hedged, every caveat listed, no position anywhere.
     The reader is left to do the synthesis, which is the part that needed
     doing.
+
+    A hedge that declines to stand behind the claim is not a position, even
+    when it names a verb like "说明" or "提示". "这可能说明 X，需要更多研究"
+    says what might be true and then withholds judgment, which is the
+    failure the check is for.
     """
     if not text or not text.strip():
         return False
-    low = text.lower()
-    if any(m in low for m in _POSITION_MARKERS):
-        return True
-    # A bare list of findings with hedges is not a position.
-    hedges = sum(1 for m in _HEDGE_ONLY if m in text)
-    return hedges > 0 and False
+    # A sentence that hedges its way out of a claim has not taken a
+    # position. If every candidate is like that, there is no position.
+    candidates = [c for c in re.split(r"[。！？!?\n]+", text) if c.strip()]
+    for c in candidates:
+        if any(m in c for m in _NO_POSITION):
+            continue
+        low = c.lower()
+        if any(m in low for m in _POSITION_MARKERS):
+            return True
+        if any(m in c for m in _CONCLUSION_SIGNALS):
+            return True
+        if any(m in low for m in _VERDICT_VERBS):
+            return True
+    return False

@@ -881,11 +881,6 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             cycle = _cycle_check(topic, previous_activity)
             if cycle:
                 ctx = f"{ctx}\n\n{cycle}"
-            # The request may belong to a different phase than the topic is
-            # in. Naming it is not refusing it.
-            fit = _phase_fit_note(topic, message)
-            if fit:
-                ctx = f"{ctx}\n\n{fit}"
             # A paused topic says so, and says what to do instead.
             demand = _protocol.review_demand(topic)
             if demand:
@@ -995,38 +990,6 @@ def _map_gaps(topic: str) -> list[str]:
 #
 # What it produces is a verdict the agent has to answer to, not a note it
 # can nod at.
-# Which requests belong to which phase.
-#
-# The point is not to refuse them. A request that belongs to another phase
-# may be a better question than the one the topic is in, and the agent is
-# entitled to notice that and change the phase. What it must not do is
-# answer the request without noticing - because "answer the last thing you
-# were asked" is exactly how a session drifts while every individual
-# answer looks reasonable.
-_PHASE_FIT: dict[str, tuple[tuple[str, ...], str]] = {
-    "scoping": (
-        ("再查", "再搜", "多找几篇", "继续搜", "找更多文献", "再多找", "搜一下文献"),
-        "这轮是界定问题，还在找证据。",
-    ),
-    "evidence": (
-        ("怎么定义", "问题该怎么问", "换个问法", "重新表述问题"),
-        "这轮是搜集证据，已经在定义了。",
-    ),
-    "weighing": (
-        ("帮我写", "写成一段", "润色", "起草", "写成论文", "写成段落"),
-        "这轮是权衡解释，还没到成文。",
-    ),
-    "closing": (
-        ("再找", "再搜", "继续找文献", "多找点文献", "再多找几篇"),
-        "这轮是收束结论，新增证据可能推翻结论——如果要找，说清它可能改变什么。",
-    ),
-    "writing": (
-        ("再查", "再搜", "继续找文献"),
-        "这轮是成文表达，新增证据会牵动全文结构。",
-    ),
-}
-
-
 def _review_due(topic: str) -> str | None:
     """Say that a review is due, at the point where it can still change
     what happens.
@@ -1065,38 +1028,6 @@ def _review_due(topic: str) -> str | None:
         return None
 
 
-def _phase_fit_note(topic: str, message: str) -> str | None:
-    """Name a request that belongs to a different phase than the topic is in.
-
-    Nothing is refused. The agent is working on a question, and the
-    question decides which action makes sense - so a request that does not
-    fit the phase is worth one sentence, and the agent may well decide the
-    request is the better question and move the phase.
-    """
-    try:
-        m = _state.read_map(topic)
-        phase = str(m.get("phase") or "").strip()
-        if not phase:
-            return None
-        entry = _PHASE_FIT.get(phase)
-        if not entry:
-            return None
-        markers, note = entry
-        low = str(message or "").lower()
-        if not any(mk.lower() in low for mk in markers):
-            return None
-        task = str(m.get("current_task") or "").strip()
-        return (
-            f"[Research OS · 请求和当前阶段不太一样]\n"
-            f"{note}"
-            + (f"当前任务是「{task[:50]}」。" if task else "")
-            + "先想清楚：照这个请求做，还是先把它放回课题的顺序里？"
-            "两者都合理，选了就说一声。"
-        )
-    except Exception:
-        return None
-
-
 def _cycle_check(topic: str, activity: dict[str, Any]) -> str | None:
     """Ask the agent to close the loop, when the loop looks open.
 
@@ -1127,23 +1058,34 @@ def _cycle_check(topic: str, activity: dict[str, Any]) -> str | None:
                 f"先说清目前认为什么、哪些解释还活着，再继续找。"
             )
 
-        # The work went somewhere other than the current task. The search
-        # terms are not in the command that ran, so the check is on the
-        # subject of the claims: a claim about something the current task
-        # does not mention is a sign the work wandered.
-        if task and claims >= 3:
-            task_terms = _content_terms(task)
+        # The work went somewhere other than the question.
+        #
+        # The anchor is the core question, not the current task. An earlier
+        # version compared the claims against the current task by word
+        # overlap, and that was wrong twice over: the task is the narrowest
+        # level and legitimately uses different words from the question, and
+        # a Chinese task shares almost no whitespace-delimited words with
+        # any claim, so every claim looked like it was off topic.
+        #
+        # The core question is what the project is about, so a claim that
+        # shares nothing with it is worth a look. The signal is one-sided:
+        # no overlap means "check this", not "you have drifted".
+        if core and claims >= 4:
+            core_terms = _content_terms(core)
             recent = _state.read_claims(topic)[-claims:]
-            if task_terms:
+            if core_terms:
                 off = 0
                 for c in recent:
                     terms = _content_terms(str(c.get("content") or ""))
-                    if terms and not (terms & task_terms):
+                    if terms and not (terms & core_terms):
                         off += 1
-                if off >= 2:
+                # Half of them, and at least three, before it is worth
+                # saying: a topic legitimately holds evidence from several
+                # vocabularies.
+                if off >= 3 and off * 2 >= len(recent):
                     lines.append(
-                        f"这一轮有 {off} 条断言跟当前任务「{task[:40]}」说的不是一回事。"
-                        f"先确认：现在做的这件事，还是核心问题「{core[:40]}」要的吗？"
+                        f"这一轮有 {off} 条断言跟核心问题「{core[:40]}」几乎不搭词。"
+                        f"先确认：现在做的这件事，还是这个课题要的吗？"
                         f"如果当前任务本身已经不对，改任务或改阶段，别继续往这个方向堆。"
                     )
 
@@ -1495,7 +1437,7 @@ def _convergence_check(
                 f"这个课题已经检索了 {count} 次，账本里有 {len(claims)} 条断言：\n"
                 f"{listed}\n"
                 f"（只列了最后 8 条）\n"
-                f"已经记过的不要再记一遍。现在该收口了：就手上的证据给出判断——"
+                f"已经记过的不要再记一遍。现在该收口了：就账本里这些证据给出判断——"
                 f"你认为什么、依据哪几条、什么还不确定——"
                 f"而不是再找一篇让清单更长。"
             )

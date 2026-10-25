@@ -1318,43 +1318,91 @@ def test_an_unknown_phase_is_refused():
     assert "nonsense" in str(out), out
 
 
-def test_a_request_from_another_phase_is_named_not_refused():
-    """The agent is working on a question, not obeying each local request
-    literally. A request that belongs to another phase may be the better
-    question - but it has to be noticed, because answering the last thing
-    you were asked is how a session drifts while every answer looks
-    reasonable."""
-    m = _handler()
-    sid = "t-fit"
-    m._tool_handler(
-        {"action": "create", "project": "FitTopic", "core_question": "Q?"},
-        session_id=sid,
+def test_each_phase_says_what_it_is_not_for():
+    """What replaced the keyword matcher that tried to guess whether a
+    request fitted the phase. The matcher fired on "再查" and missed "再
+    找找", and it could not tell a research search from a technical one -
+    but the agent knows which is which, and can say so."""
+    _fresh_topic("T-gate", "Q?")
+    seen = set()
+    for phase in ("scoping", "evidence", "weighing", "closing", "writing"):
+        m = state.read_map("T-gate")
+        m["phase"] = phase
+        state.write_map("T-gate", m)
+        block = protocol.build_research_block("T-gate", {"max_inject_chars": 2000})
+        assert "这轮不要做" in block, phase
+        gate = protocol.phase_gate(phase)
+        assert gate and gate in block, phase
+        seen.add(gate)
+    assert len(seen) == 5
+
+
+def test_a_request_is_never_matched_against_keyword_lists():
+    """The keyword matcher was removed. Guessing from outside whether a
+    request fits the phase is unreliable: it fired on "再查" and missed
+    "再找找", and it could not tell a research search from a technical
+    one. The phase states its own boundary and the agent reads it."""
+    import research_os
+    assert not hasattr(research_os, "_phase_fit_note")
+    assert not hasattr(research_os, "_PHASE_FIT")
+
+
+def test_a_hedged_sentence_is_not_taken_for_a_position():
+    """"这可能说明 X，需要更多研究" names what might be going on and then
+    declines to stand behind it. That is the shape the check exists to
+    catch, not to accept."""
+    assert audit.has_position("综合来看，这更支持残余缺损确实存在。") is True
+    assert audit.has_position("这可能说明炎症水平在缓解期仍然偏高，需要更多研究。") is False
+    assert audit.has_position("Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。") is False
+
+
+def test_the_position_check_reads_the_moves_not_a_word_list():
+    """A first version matched a list of words and missed
+    "综上，残余缺损以累积损伤为主", which is plainly a position and
+    carries none of the words in the list. The set of ways to take a
+    position is open, so the signals have to be structural: a conclusion
+    opener, or a verb of verdict."""
+    for text in (
+        "综上，残余缺损以累积损伤为主，混杂说被削掉。",
+        "总体上，现有证据更支持药物混杂解释。",
+        "H. pylori 一支已被两个人群的大样本否定。",
+        "证据不足以区分这两条通路。",
+        "我倾向认为药物混杂解释更可能，但证据还不够。",
+    ):
+        assert audit.has_position(text) is True, text
+    for text in (
+        "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。",
+        "Smith 2019 的队列研究表明工作记忆容量在抑郁中显著下降。",
+        "这两项研究都测了工作记忆容量。",
+        "相关性见 Table 2，p < 0.05。",
+        "文件已转换完毕，输出在 /tmp/out.pdf。",
+    ):
+        assert audit.has_position(text) is False, text
+
+
+def test_the_off_topic_check_does_not_fire_on_a_chinese_topic():
+    """An earlier version compared claims against the current task by word
+    overlap. A Chinese task shares almost no whitespace-delimited words
+    with any claim, so every claim looked off topic - a false-positive
+    machine. The anchor is the core question, and the signal is one-sided:
+    no overlap means "check this", not "you have drifted"."""
+    _fresh_topic("T-off", "睡眠剥夺后记忆功能是否随之恢复")
+    state.append_claim("T-off", {
+        "kind": "report",
+        "content": "恢复睡眠后患者的记忆功能仍未完全恢复",
+        "source": "PMID 1",
+    })
+    state.append_claim("T-off", {
+        "kind": "report",
+        "content": "sodium valproate reduces seizure frequency in pediatric epilepsy",
+        "source": "PMID 2",
+    })
+    import research_os as _ros
+    out = _ros._cycle_check(
+        "T-off", {"evidence": 4, "ledger": 2, "moves": 0}
     )
-    m._tool_handler({"action": "on", "project": "FitTopic"}, session_id=sid)
-    m._tool_handler(
-        {
-            "action": "set_state",
-            "project": "FitTopic",
-            "goal": "g",
-            "current_task": "compare the two explanations",
-            "phase": "weighing",
-        },
-        session_id=sid,
-    )
-    # A request that belongs to the writing phase.
-    out = m._pre_llm_call(
-        session_id=sid, user_message="帮我把这个写成一段话", turn_id="t1"
-    )
-    assert out is not None
-    assert "阶段" in out["context"]
-    # And the request is not blocked - the agent may well prefer it.
-    blocked = m._pre_tool_call(
-        tool_name="write_file",
-        session_id=sid,
-        turn_id="t1",
-        args={"path": "/tmp/x.md", "content": "y"},
-    )
-    assert blocked is None or blocked.get("action") != "block", blocked
+    # Two claims, one of them foreign: not enough to accuse the agent.
+    assert out is None or "不搭词" not in out, out
 
 
 def test_a_pause_verdict_stops_the_searching():

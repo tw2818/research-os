@@ -48,6 +48,10 @@ PHASES: dict[str, dict[str, str]] = {
         "output": (
             "给出你选定的问法，以及放弃其他问法的代价。"
         ),
+        "gate": (
+            "这一阶段不要急着找证据。先把问题问准——"
+            "如果用户这轮给的是一个具体任务，先问它服务的是哪个问法。"
+        ),
     },
     "evidence": {
         "name": "搜集证据",
@@ -58,6 +62,11 @@ PHASES: dict[str, dict[str, str]] = {
         ),
         "output": (
             "给出这批证据支持什么、不支持什么，一句话结论。"
+        ),
+        "gate": (
+            "这一阶段只找证据，不下结论，也不改问题。"
+            "找之前先说清你要看到什么——"
+            "如果用户这轮要的是一个判断，说明现在还不到回答的时候。"
         ),
     },
     "weighing": {
@@ -70,6 +79,10 @@ PHASES: dict[str, dict[str, str]] = {
         "output": (
             "给出哪个解释现在更划算、哪个被削掉了、依据是什么。"
         ),
+        "gate": (
+            "这一阶段做取舍：不必把所有材料都摆出来，"
+            "挑最能改变判断的那几条。"
+        ),
     },
     "closing": {
         "name": "收束结论",
@@ -81,6 +94,9 @@ PHASES: dict[str, dict[str, str]] = {
         "output": (
             "给出结论、它的强度、以及在什么条件下不成立。"
         ),
+        "gate": (
+            "这一阶段不要新增证据。结论要改，先说清哪条证据会改它。"
+        ),
     },
     "writing": {
         "name": "成文表达",
@@ -90,6 +106,9 @@ PHASES: dict[str, dict[str, str]] = {
         ),
         "output": (
             "给出成稿的段落式结论，读者读完能带走一个立场。"
+        ),
+        "gate": (
+            "这一阶段只写。发现结论有问题就标出来，别在写作时顺手改结论。"
         ),
     },
 }
@@ -103,6 +122,20 @@ def phase_thinking(phase: str) -> str:
     if not entry:
         entry = PHASES[DEFAULT_PHASE]
     return f"当前阶段：{entry['name']}\n{entry['thinking']}"
+
+
+def phase_gate(phase: str) -> str:
+    """What this phase is not for.
+
+    This is what replaced a keyword matcher that tried to guess whether a
+    request fitted the phase. The matcher fired on "再查" and missed "再
+    找找", and it could not tell a research search from a technical one -
+    but the agent knows which is which, and can say so. Stating the
+    boundary in the phase is more reliable than guessing at it from
+    outside.
+    """
+    entry = PHASES.get(str(phase or "").strip()) or PHASES[DEFAULT_PHASE]
+    return str(entry.get("gate") or "")
 
 
 def phase_output(phase: str) -> str:
@@ -362,6 +395,9 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         shape = phase_output(phase)
         if shape:
             lines.append(f"这轮要交出的东西：{shape}")
+        gate = phase_gate(phase)
+        if gate:
+            lines.append(f"这轮不要做：{gate}")
     # The situation comes next: the state of play, not a list of things
     # someone wrote down once.
     lines.extend(_situation(topic))

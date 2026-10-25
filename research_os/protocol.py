@@ -641,12 +641,23 @@ def _truncate(block: str, cap: int) -> str:
     # question is settled will go and settle it again, and the search is
     # the expensive part. Repeating that work costs more than a few
     # characters of rules.
-    keep_settled = re.compile(r"^(已解问题（不用再查）：)")
-    # The rest of the frame: the questions still open, and the hypotheses
-    # the map is still holding. Below the rules - the rules are how to
-    # work, and the frame is what to work on - and above the situation,
-    # which is context the topic file already holds.
-    keep_third = re.compile(r"^(待解问题（还没解）：|未处理的假设：)")
+    # The settled questions and the open ones are both about where the
+    # work is, and both sit with the standing, above the rules. A
+    # question that is already answered is work nobody should be
+    # repeating; a question that is still open is where the work is.
+    # Getting either of them wrong costs a search, and a search costs
+    # more than the rules do.
+    #
+    # They were split once because they were both below the rules, and
+    # the rules took the space: a project with a long narrative and many
+    # open questions lost the open questions, and the agent was left
+    # with the settled ones and no idea what was still open.
+    keep_settled = re.compile(
+        r"^(已解问题（不用再查）：|待解问题（还没解）：)"
+    )
+    # The width of the hypothesis space is worth having and is not worth
+    # the rules. It is a warning, not a place to work.
+    keep_third = re.compile(r"^(未处理的假设：)")
 
     kept: list[str] = []
     used = 0

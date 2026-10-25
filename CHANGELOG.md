@@ -55,6 +55,16 @@ record of the work was missing.
 
 ### Fixed
 
+- **The open questions could be crowded out of the block.** The settled
+  questions were given the standing's priority and the open ones were
+  left below the rules, so a project with a long narrative and a full
+  list of open questions lost the open questions and kept the settled
+  ones — the agent was left knowing what was done and not knowing what
+  was left. Both are about where the work is, and getting either of
+  them wrong costs a search, so both now sit with the standing. The
+  width of the hypothesis space stays below the rules: it is a warning
+  that the judgement may be narrower than the question, not a place to
+  work.
 - **The state tree could not be moved.** `RESEARCH_OS_HOME` set the
   location, and it works for a script — but Hermes scrubs the
   environment of the tools it hands to the model, so the variable was

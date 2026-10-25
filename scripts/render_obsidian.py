@@ -1000,7 +1000,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="render only the topic map, not the ledger or the decision log",
     )
+    p.add_argument(
+        "--home",
+        help="the state tree to render from (default: the installed one)",
+    )
     args = p.parse_args(argv)
+
+    if args.home:
+        # The state tree is normally found through a pointer file, and the
+        # pointer belongs to the installation. A second tree - a test
+        # instance, an export - has to be named explicitly, because
+        # nothing else can tell the two apart.
+        target = Path(args.home).expanduser()
+        state._resolve_home = lambda: target  # type: ignore[attr-defined]
 
     cfg = state.load_config()
     vault = str(cfg.get("obsidian_vault") or "").strip()

@@ -343,6 +343,18 @@ python3 scripts/render_obsidian.py --all --plain  # plain markdown, no Obsidian 
 python3 scripts/render_obsidian.py --all --map-only
 ```
 
+**Two state trees, two vaults.** The renderer reads the tree the pointer
+file names, so a second tree has to be asked for by name:
+
+```bash
+python3 scripts/render_obsidian.py --all --home /path/to/other/tree
+```
+
+That is what a test instance needs: its own state tree, its own vault,
+its own notes, and the production notes untouched. `scripts/switch-tree.sh`
+points a profile at one tree or the other, and prints where each profile
+points.
+
 **Without Obsidian, the notes still get written.** A missing vault is not
 an error: the notes go to `~/.hermes/research-os/notes/<topic>/` as plain
 markdown, and the reader is told where they went. Set `require_vault` to

@@ -2754,6 +2754,18 @@ def test_search_guard_mentions_creating_when_no_topics():
     assert "create" in msg or "课题" in msg
 
 
+def test_renderer_can_be_told_which_tree_to_render():
+    """The renderer reads the tree the pointer names.
+
+    A second tree - a test instance, an export - has to be asked for by
+    name, or the two render into each other.
+    """
+    src = Path(__file__).resolve().parents[1] / "scripts" / "render_obsidian.py"
+    text = src.read_text(encoding="utf-8")
+    assert '"--home"' in text, "the renderer has no --home"
+    assert "state._resolve_home" in text, "--home does not move the state tree"
+
+
 # --------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------

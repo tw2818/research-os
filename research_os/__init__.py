@@ -595,7 +595,16 @@ def _expand_source(project: str, claim: dict[str, Any]) -> dict[str, Any]:
 def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
     action = str(args.get("action") or "status").strip().lower()
     project = str(args.get("project") or "").strip()
-    session_id = str(kwargs.get("session_id") or args.get("session_id") or "unknown")
+    session_id = str(kwargs.get("session_id") or args.get("session_id") or "").strip()
+    if not session_id or session_id == "unknown":
+        # A tool call that arrives through a bridge can lose the session id.
+        # Writing to "unknown" is worse than failing: the tool returns a
+        # success payload and the conversation is left exactly where it was,
+        # so the next search is blocked by a guard that sees an idle session
+        # and nothing anywhere says why. A live run spent four turns in that
+        # state. Recover the id from the pointer the hooks maintain, and if
+        # that is stale, say so instead of inventing a session.
+        session_id = _state.active_session() or ""
 
     def ok(payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False)
@@ -714,6 +723,16 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             return ok({"deleted": project, "trashed_to": dest, "permanent": bool(args.get("permanent"))})
 
         if action in ("on", "switch"):
+            # Entering a topic is a write to a session, so a session is
+            # required. Answering with the topic's contents and no session
+            # written is the failure this check exists for: the payload looks
+            # exactly like success.
+            if not session_id:
+                return fail(
+                    "无法确定当前会话，未进入课题。会话 id 没能从调用上下文或 .active_session "
+                    "拿到——最近一次钩子写入超过 15 分钟，或者会话已结束。请在对话里重试一次，"
+                    "或在参数里显式传 session_id。"
+                )
             if not project:
                 return fail("project is required: name the topic to work on")
             if not _state.topic_exists(project):
@@ -778,6 +797,8 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
         if action == "off":
             # Clear the topic too: a stale topic makes the next "on" report a
             # switch that never happened.
+            if not session_id:
+                return fail("无法确定当前会话；退出科研模式需要知道是哪个会话。")
             _state.set_session_mode(session_id, "idle", clear_topic=True)
             return ok({"mode": "idle", "topic": ""})
 
@@ -1162,6 +1183,11 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 reason=note,
                 direction_changed=bool(args.get("direction_changed")),
             )
+            # Mark the turn that paid the debt, so the answer check can tell
+            # a review that was made from one that was promised. Without it
+            # the outgoing note would fire on the turn that fixed things.
+            if session_id:
+                _state.note_session_reviewed(session_id)
             return ok(
                 {
                     "review": entry,
@@ -1238,6 +1264,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             return None
 
         session_id = str(kwargs.get("session_id") or "unknown")
+        # The hooks always know the session; a tool call that comes back
+        # through a bridge may not. Record it here so the pointer the tool
+        # falls back on is current rather than a guess.
+        _state.note_active_session(session_id)
         message = kwargs.get("user_message") or ""
         if isinstance(message, (list, dict)):
             message = json.dumps(message, ensure_ascii=False)
@@ -1266,6 +1296,14 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         _topic = str(_prev.get("topic") or "")
         if _topic and _prev.get("mode") == "research":
             _state.note_turn_since_review(_topic)
+            # A review that was asked for and not made is a debt that grows
+            # by the turn. Two blocks and then silence is how it used to be
+            # ignored; the turn counter is what lets the debt escalate and
+            # then, at the cap, be written down as never answered instead of
+            # quietly reset.
+            if _state.review_owed(_topic).get("owed"):
+                if _state.note_owed_turn(_topic) > 3:
+                    _state.mark_review_abandoned(_topic)
 
         s = _state.read_session(session_id)
         mode = s.get("mode", "idle")
@@ -2197,6 +2235,24 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
                 f"*[Research OS] 这一轮给的是材料，没给判断。"
                 f"读者要自己合成，而合成正是最该有人做的一步。"
                 f"补一句你目前认为什么、依据哪几条、什么会改变它。*"
+            )
+
+        # A review was asked for and this answer did not make one. The agent
+        # can talk its way past a reminder in the injected block - it did, for
+        # four turns - but it cannot talk its way past something the reader
+        # will see. The note states the debt and the one question the review
+        # has to answer, and it is not added when the review was recorded this
+        # turn, because then the debt is paid.
+        owed = _state.review_owed(topic)
+        if owed.get("owed") and not _state.session_reviewed_this_turn(session_id):
+            tries = owed.get("demanded") or 0
+            turns = owed.get("turns") or 0
+            return (
+                f"{response}\n\n"
+                f"---\n"
+                f"*[Research OS] 这个课题的全局审查已催 {tries} 次、跨 {turns} 轮，"
+                f"本轮仍未做。审查要回答的是：如果继续检索，预期会改变哪个判断？"
+                f"答不出来，就该收手，而不是继续找材料。*"
             )
         return None
     except Exception:

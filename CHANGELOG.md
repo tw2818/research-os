@@ -54,6 +54,45 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.6.0] — 2026-10-25
+
+Note on the versions before this one: `plugin.yaml` was bumped to 0.4.0 and
+0.5.0 without changelog entries being written, so the headings above are
+behind the manifest. This entry is the first one written since 0.3.0.
+
+- **A reminder the agent could answer in prose and walk past.** The review
+  demand lived at the search boundary only: it blocked twice, then became
+  a note. A live topic read the demand, spent four turns on layout and
+  translation work, and nothing anywhere said a review was still
+  outstanding — the counters had been spent and the topic carried on as if
+  nothing had been asked. A demand now opens a **debt** (`owed`,
+  `owed_since`, `owed_turns`) that only a recorded review closes. While it
+  is owed the debt line sits at the top of the injected block, survives the
+  budget cut, and the thinking rules are **withheld** rather than repeated:
+  repeating them is what already failed, so the debt costs the agent the one
+  thing it cannot proceed without. The rules come back when the review is
+  recorded.
+- **The debt is visible to the reader, not only to the agent.** An agent can
+  talk its way past a line in its own context; it cannot talk its way past
+  something the user reads. When a review is owed and the answer did not
+  make one, `transform_llm_output` appends a note naming how many times it
+  has been asked and how many turns it has been owed, plus the one question
+  the review has to answer. It is not added on the turn the review was
+  recorded, which `note_session_reviewed` distinguishes by turn id rather
+  than by timestamp.
+- **The debt outlives its cap instead of being reset.** After four owed
+  turns the nag stops — a hook that keeps refusing is a stall — but
+  `abandoned_at` is written rather than the counters being cleared, so the
+  topic keeps the fact that the review was never made.
+- **A tool call that lost its session wrote to a session nobody was in.**
+  `action='on'` through a bridge returned a full success payload while the
+  conversation's session stayed idle, so every guard that reads the session
+  saw an idle conversation and the agent was blocked from searching its own
+  topic. The hooks always get the real session id, so they now record it in
+  `<state>/.active_session` (bounded to 15 minutes), and the tool falls back
+  to that. When nothing can be resolved, `on` and `off` **fail** with a
+  message instead of answering with a payload that looks like success.
+
 ## [Unreleased]
 
 ## [0.3.0] — 2026-10-25

@@ -5,6 +5,7 @@ Run:  python3 -m pytest tests/ -q      (or)  python3 tests/test_research_os.py
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -2787,6 +2788,165 @@ def _run_all() -> int:
             traceback.print_exc()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
+
+
+
+
+# --------------------------------------------------------------------------
+# a review that was asked for and not made
+# --------------------------------------------------------------------------
+
+def test_a_demand_opens_a_debt_and_a_review_closes_it():
+    """The counter alone was enough to stop asking and not enough to notice
+    that the asking had been ignored. A live topic ran four turns of
+    production work past two demands with nothing anywhere saying a review
+    was outstanding."""
+    t = _fresh_topic("Debt", "Q?")
+    assert state.review_owed("Debt").get("owed") in (False, None)
+
+    state.note_review_demand("Debt")
+    owed = state.review_owed("Debt")
+    assert owed["owed"] is True
+    assert owed["demanded"] == 1
+
+    state.record_review("Debt", "continue", "reviewed")
+    assert state.review_owed("Debt").get("owed") is False
+
+
+def test_the_debt_survives_the_two_blocks_that_used_to_end_it():
+    """After two demands the convergence check stops blocking, because a hook
+    that keeps refusing the same tool is a stall. The debt is what carries the
+    fact past that point."""
+    t = _fresh_topic("DebtLife", "Q?")
+    state.note_review_demand("DebtLife")
+    state.note_review_demand("DebtLife")
+    assert state.review_owed("DebtLife")["demanded"] == 2
+    assert state.review_owed("DebtLife")["owed"] is True
+
+
+def test_an_owed_review_takes_the_thinking_rules_away():
+    """Repeating the reminder is what already failed: the agent read it and
+    kept working, because nothing it needed had been taken away."""
+    _fresh_topic("DebtBlock", "Q?")
+    before = protocol.build_research_block("DebtBlock", {"max_inject_chars": 6000})
+    assert protocol.THINKING_RULES[:20] in before
+    assert "审查欠着：" not in before
+
+    state.note_review_demand("DebtBlock")
+    state.note_owed_turn("DebtBlock")
+    after = protocol.build_research_block("DebtBlock", {"max_inject_chars": 6000})
+    assert "审查欠着：" in after
+    assert protocol.THINKING_RULES[:20] not in after
+    assert "思维规则暂不发放：" in after
+
+
+def test_the_debt_line_survives_a_tight_budget():
+    """Placed above the situation and never cut: a long narrative pushed the
+    one line the agent owes out of the block, which makes the mechanism
+    decorative."""
+    _fresh_topic("DebtCut", "Q?")
+    m = state.read_map("DebtCut")
+    m["narrative"] = "很长的一段叙事。" * 400
+    state.write_map("DebtCut", m)
+    state.note_review_demand("DebtCut")
+    block = protocol.build_research_block("DebtCut", {"max_inject_chars": 700})
+    assert "审查欠着：" in block
+
+
+def test_the_answer_says_so_when_the_review_was_not_made():
+    """The agent can talk its way past a reminder in the injected block. It
+    cannot talk its way past something the reader sees."""
+    m = _handler()
+    sid = "t-owed-answer"
+    m._tool_handler(
+        {"action": "create", "project": "OwedAns", "core_question": "Q?"}, session_id=sid
+    )
+    m._tool_handler({"action": "on", "project": "OwedAns"}, session_id=sid)
+    m._tool_handler(
+        {"action": "set_state", "project": "OwedAns", "phase": "weighing",
+         "narrative": "现判断：X。依据是 Y。"},
+        session_id=sid,
+    )
+    state.note_review_demand("OwedAns")
+
+    out = m._transform_llm_output(
+        response_text="综上，我认为 X 成立，依据是 Y。", session_id=sid
+    )
+    assert out and "全局审查已催" in out
+
+
+def test_the_answer_is_quiet_on_the_turn_the_review_is_made():
+    m = _handler()
+    sid = "t-owed-paid"
+    m._tool_handler(
+        {"action": "create", "project": "OwedPaid", "core_question": "Q?"}, session_id=sid
+    )
+    m._tool_handler({"action": "on", "project": "OwedPaid"}, session_id=sid)
+    m._tool_handler(
+        {"action": "set_state", "project": "OwedPaid", "phase": "weighing",
+         "narrative": "现判断：X。"},
+        session_id=sid,
+    )
+    state.note_review_demand("OwedPaid")
+    m._tool_handler(
+        {"action": "review", "project": "OwedPaid", "verdict": "continue",
+         "review_note": "material did not change the judgement"},
+        session_id=sid,
+    )
+    out = m._transform_llm_output(
+        response_text="综上，我认为 X 成立。", session_id=sid
+    )
+    assert not out or "全局审查已催" not in out
+
+
+def test_an_abandoned_debt_nags_no_more_but_stays_on_the_record():
+    t = _fresh_topic("DebtAband", "Q?")
+    state.note_review_demand("DebtAband")
+    state.mark_review_abandoned("DebtAband")
+    assert state.review_owed("DebtAband").get("owed") is False
+    r = state.read_review("DebtAband")
+    assert r.get("abandoned_at")
+    block = protocol.build_research_block("DebtAband", {"max_inject_chars": 6000})
+    assert "审查欠着：" not in block
+    assert protocol.THINKING_RULES[:20] in block
+
+
+# --------------------------------------------------------------------------
+# the session a bridge call lost
+# --------------------------------------------------------------------------
+
+def test_the_tool_finds_the_session_the_hooks_recorded():
+    """A tool call through a bridge can lose the session id. Writing to
+    "unknown" is worse than failing: the payload looks like success and the
+    conversation stays where it was."""
+    m = _handler()
+    sid = "t-pointer"
+    state.note_active_session(sid)
+    m._tool_handler(
+        {"action": "create", "project": "PointerTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    # No session_id passed: the call must land on the recorded session.
+    out = m._tool_handler({"action": "on", "project": "PointerTopic"})
+    assert json.loads(out).get("mode") == "research"
+    assert state.read_session(sid).get("topic") == "PointerTopic"
+
+
+def test_entering_a_topic_refuses_when_no_session_is_known():
+    m = _handler()
+    m._tool_handler(
+        {"action": "create", "project": "NoSession", "core_question": "Q?"},
+        session_id="t-tmp",
+    )
+    # Age the pointer out rather than deleting it: that is the real shape of
+    # the failure, a stale pointer from a conversation that has ended.
+    path = state.home() / state.ACTIVE_SESSION_FILE
+    if path.is_file():
+        path.unlink()
+    out = m._tool_handler({"action": "on", "project": "NoSession"})
+    payload = json.loads(out)
+    assert payload.get("error"), payload
+    assert "无法确定当前会话" in payload["error"]
 
 
 if __name__ == "__main__":

@@ -367,7 +367,7 @@ elsewhere.
 
 | key | default | what it does |
 |---|---|---|
-| `obsidian_vault` | — | where the rendered notes go |
+| `obsidian_vault` | - | where the rendered notes go |
 | `obsidian_subdir` | `ResearchOS` | folder inside the vault |
 | `obsidian_enabled` | `true` | set `false` to skip the vault rendering |
 | `inject_protocol` | `true` | set `false` to turn the whole thing off |
@@ -377,7 +377,7 @@ elsewhere.
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |
 | `literature_backend` | `auto` | `auto` uses a bibliography service if the agent has one, and files if it does not; `zotero` and `files` pin it |
 | `require_vault` | `false` | `true` makes a missing Obsidian vault an error instead of falling back to plain markdown |
-| `notes_dir` | — | where the notes go when there is no vault (default: `<state home>/notes/`) |
+| `notes_dir` | - | where the notes go when there is no vault (default: `<state home>/notes/`) |
 
 A topic can override the review interval in its own `research-map.json`
 with `review_every: {"searches": n, "turns": n}`, which the agent can set
@@ -417,6 +417,13 @@ research_mode(action="amend", project="X", claim_id="L44", strength="suggestive"
 research_mode(action="contradict", project="X", title="...", separator="...")
 research_mode(action="set_state", project="X", phase="weighing", narrative="...")
 research_mode(action="set_state", project="X", parent="The-Review")
+research_mode(action="map", project="X", open_questions="Q1? | Q2?")
+research_mode(action="question", project="X", question="Q that is still open")
+research_mode(action="question", project="X", closed="the old question",
+              question="what answered it")
+research_mode(action="hypothesis", project="X", hypothesis="an untested idea")
+research_mode(action="repair", project="X")
+research_mode(action="delete", project="X")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")

@@ -565,6 +565,25 @@ def _standing(topic: str) -> list[str]:
     return lines
 
 
+def _review_owed_line(topic: str) -> str:
+    """The debt, in one line, in front of the agent at the top of the block.
+
+    This is the mechanism that replaces a reminder the agent could answer
+    in prose and move past. The prose answer looked like compliance and
+    left nothing behind; this line is read before anything else, cannot be
+    cut by the budget, and stays until a review is recorded.
+    """
+    d = read_review(topic)
+    if not d.get("owed") or d.get("abandoned_at"):
+        return ""
+    demanded = int(d.get("demanded") or 0)
+    turns = int(d.get("owed_turns") or 0)
+    return (
+        f"审查欠着：已催 {demanded} 次、已过去 {turns} 轮仍未做。"
+        "这轮先做审查（research_mode action='review'），再谈别的。"
+    )
+
+
 def review_demand(topic: str, review: dict[str, Any] | None = None) -> list[str]:
     """Ask for the review, when a review is due.
 
@@ -631,6 +650,14 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
     # phase and the current task are what the turn is for; the evidence is
     # what the turn works with.
     lines.extend(_standing(topic))
+    # A review that was asked for and not made is a debt, and it goes above
+    # the situation: while it is outstanding the agent's own method is
+    # withheld, so continuing in the old frame is not one of the options.
+    # The demand used to live at the search boundary only, which meant the
+    # agent could spend its whole turn on something else and never meet it.
+    owed = _review_owed_line(topic)
+    if owed:
+        lines.append(owed)
     # The phase decides the shape of the answer, not only the way of
     # thinking about it. A model that gathers evidence while it should be
     # weighing explanations produces a list of findings with no position in
@@ -668,9 +695,22 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
     # the format teaches the model to fill the format; a mode that leads with
     # the thinking teaches it to think, and the ledger is where the thinking
     # gets recorded.
-    lines.append(THINKING_RULES)
-    lines.append(TURN_DEMAND)
-    lines.append(SCOPE_RULE)
+    #
+    # While a review is owed they are withheld rather than repeated. Repeating
+    # them is what already failed: the agent read the reminder and kept
+    # working, because nothing it needed had been taken away. The moves are
+    # the one thing it cannot proceed without, so they are what the debt
+    # costs, and they come back when the review is recorded.
+    if owed:
+        lines.append(
+            "思维规则暂不发放：这个课题的审查一直没做。先调 "
+            "research_mode(action='review', project=..., verdict='continue|redirect|pause', "
+            "review_note='...') 把审查做掉，规则下一轮复原。"
+        )
+    else:
+        lines.append(THINKING_RULES)
+        lines.append(TURN_DEMAND)
+        lines.append(SCOPE_RULE)
     lines.append(f"（以上仅属于 {topic} 课题，不要套用到别的话题。）")
 
     block = "\n".join(lines)
@@ -691,6 +731,11 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
 _KEEP_PREFIXES = (
     '[Research OS',
     '核心问题：',
+    # The review debt. It is placed above the situation and has to survive
+    # the cut, or a long narrative pushes the one line the agent owes out
+    # of the block and the mechanism is decorative.
+    '审查欠着：',
+    '思维规则暂不发放：',
     '课题目标：',
     '当前阶段：',
     '当前任务：',
@@ -750,6 +795,7 @@ def _rejoin_paragraphs(block: str) -> str:
     # swallowed into the plan and lost with it.
     own_field = re.compile(
         r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|"
+        r"审查欠着：|思维规则暂不发放：|"
         r"这轮要交出的东西：|这轮不要做：|对齐检查|已解问题|待解问题|"
         r"当前最佳解释|候选解释|受质疑的解释|能分开它的证据|竞争解释：|"
         r"未处理的假设：|如果用户这轮|（以上仅属于|做完整之后用|"
@@ -850,6 +896,7 @@ def _truncate(block: str, cap: int) -> str:
     # research session that read well and recorded nothing.
     keep_first = re.compile(
         r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|"
+        r"审查欠着：|思维规则暂不发放：|"
         r"当前判断（课题叙事）：|下一步计划：|这轮要交出的东西：|这轮不要做：|"
         r"所属总课题：|总课题的核心问题：|同一总课题下的其他子课题：|"
         r"如果用户这轮|（以上仅属于)"
@@ -897,7 +944,12 @@ def _truncate(block: str, cap: int) -> str:
     # nowhere else. So when the two compete, the standing is the one
     # that gets cut.
     tool_line = "做完整之后用 research_mode(action='claim', project='<课题>', claim={...}) 记下来。"
-    rules_cost = sum(len(b) + 1 for b in blocks)
+    # While a review is owed the thinking rules are not in the block at all,
+    # so reserving their cost would spend the budget on a line that is not
+    # there and squeeze out the standing - the block would be short and the
+    # debt line would be the first thing to go.
+    rules_present = THINKING_RULES.split("\n")[0][:10] in block
+    rules_cost = sum(len(b) + 1 for b in blocks) if rules_present else 0
     think_cost = len(blocks[0]) + 1
     tool_cost = len(tool_line) + 1
     reserved = rules_cost if rules_cost + 400 <= cap else (think_cost + tool_cost)

@@ -583,6 +583,19 @@ _REVIEW_DEFAULTS: dict[str, Any] = {
     # refusing the same tool is a stall and a stall is worse than a long
     # search.
     "demanded": 0,
+    # A review that was asked for and not made is a debt, and the debt is
+    # the thing that has to survive. `demanded` counts how often the agent
+    # was asked; `owed` says the asking went unanswered. Without the second
+    # flag the two blocks were spent and the topic carried on as if nothing
+    # had been asked - a live topic ran four turns of production work past
+    # two demands, and nothing anywhere said a review was outstanding.
+    "owed": False,
+    "owed_since": 0.0,
+    "owed_turns": 0,
+    # Set when the debt outlives its cap. The nag stops, the fact that it
+    # was never answered stays on the record rather than being reset to a
+    # clean slate, because a clean slate is the same lie as never asking.
+    "abandoned_at": 0.0,
 }
 
 
@@ -621,11 +634,61 @@ def note_turn_since_review(topic: str) -> int:
 
 
 def note_review_demand(topic: str) -> int:
-    """Count a review that was asked for and not made."""
+    """Count a review that was asked for and not made.
+
+    Asking is not the same as the agent answering, so the demand also
+    opens a debt: `owed` stays true until a review is recorded, and it is
+    the flag the injected block and the outgoing answer both read. The
+    counter alone was enough to stop asking and not enough to notice that
+    the asking had been ignored.
+    """
     d = read_review(topic)
     d["demanded"] = int(d.get("demanded") or 0) + 1
+    if not d.get("owed"):
+        d["owed"] = True
+        d["owed_since"] = now()
+        d["owed_turns"] = 0
     write_review(topic, d)
     return int(d["demanded"])
+
+
+def note_owed_turn(topic: str) -> int:
+    """Count a research turn that passed with the review still owed."""
+    d = read_review(topic)
+    if not d.get("owed"):
+        return 0
+    d["owed_turns"] = int(d.get("owed_turns") or 0) + 1
+    write_review(topic, d)
+    return int(d["owed_turns"])
+
+
+def review_owed(topic: str) -> dict[str, Any]:
+    """Is a review outstanding, and for how long."""
+    d = read_review(topic)
+    if not d.get("owed") or d.get("abandoned_at"):
+        return {"owed": False}
+    return {
+        "owed": True,
+        "demanded": int(d.get("demanded") or 0),
+        "turns": int(d.get("owed_turns") or 0),
+        "since": float(d.get("owed_since") or 0.0),
+    }
+
+
+def mark_review_abandoned(topic: str) -> None:
+    """Stop nagging, and keep the fact that the debt was never answered.
+
+    A demand that blocks forever is a stall, so it has to end. Ending it
+    by resetting the counters would erase the thing worth knowing, which
+    is that the agent worked on past a review it was asked for. The debt
+    is closed with a timestamp and the topic keeps it.
+    """
+    d = read_review(topic)
+    if not d.get("owed"):
+        return
+    d["owed"] = False
+    d["abandoned_at"] = now()
+    write_review(topic, d)
 
 
 def review_demands(topic: str) -> int:
@@ -658,6 +721,13 @@ def record_review(
     d["searches_since_review"] = 0
     d["turns_since_review"] = 0
     d["demanded"] = 0
+    # The debt is paid, and any earlier abandonment is cleared with it: the
+    # review was made in the end, so the record should not keep saying it
+    # was not.
+    d["owed"] = False
+    d["owed_since"] = 0.0
+    d["owed_turns"] = 0
+    d["abandoned_at"] = 0.0
     # Only a verdict that found the work off the core question pauses it.
     # "continue" and "adjust" both keep the work going; "adjust" means the
     # direction is being changed and the state says so.
@@ -1080,6 +1150,45 @@ def session_path(session_id: str) -> Path:
     return sessions_dir() / f"{safe}.json"
 
 
+# The session the conversation is running under, as last seen by a hook that
+# was told it. A tool call that arrives through a bridge can lose the
+# session id, and losing it is not a neutral failure: the tool then writes
+# to "unknown", and every guard that reads the session sees an idle
+# conversation. A live run was blocked from searching its own topic, and
+# the tool that was supposed to enter the topic answered with a success
+# payload for a session nobody was in.
+#
+# The hooks always get the real id, so the pointer is written where the
+# information actually exists and read where it is missing. It is bounded
+# by age: a pointer from an hour ago is a different conversation, and
+# guessing is worse than saying the session is unknown.
+
+ACTIVE_SESSION_FILE = ".active_session"
+ACTIVE_SESSION_MAX_AGE = 900.0
+
+
+def note_active_session(session_id: str) -> None:
+    if not session_id or session_id == "unknown":
+        return
+    path = home() / ACTIVE_SESSION_FILE
+    _write_json(path, {"session_id": session_id, "ts": now()})
+
+
+def active_session(max_age: float = ACTIVE_SESSION_MAX_AGE) -> str | None:
+    """The session a recent hook saw, if it is recent enough to trust."""
+    path = home() / ACTIVE_SESSION_FILE
+    data = _read_json(path, {})
+    if not isinstance(data, dict):
+        return None
+    sid = str(data.get("session_id") or "").strip()
+    ts = float(data.get("ts") or 0.0)
+    if not sid or sid == "unknown":
+        return None
+    if now() - ts > max_age:
+        return None
+    return sid
+
+
 def note_session_literature(session_id: str, backend: str) -> None:
     """Record which literature backend this session has available.
 
@@ -1137,6 +1246,28 @@ def set_session_mode(
     s["updated_at"] = now()
     write_session(session_id, s)
     return s
+
+
+def note_session_reviewed(session_id: str) -> None:
+    """Record that this turn's review was actually made.
+
+    The outgoing answer check needs to tell a review that was recorded from
+    one that was talked about. The turn id is already on the session, so the
+    two are compared rather than timed: a timestamp would call any review in
+    the last few minutes current, including one from the previous turn.
+    """
+    if not session_id or session_id == "unknown":
+        return
+    s = read_session(session_id)
+    s["reviewed_turn"] = str(s.get("turn_id") or "")
+    s["updated_at"] = now()
+    write_session(session_id, s)
+
+
+def session_reviewed_this_turn(session_id: str) -> bool:
+    s = read_session(session_id)
+    turn = str(s.get("turn_id") or "")
+    return bool(turn) and str(s.get("reviewed_turn") or "") == turn
 
 
 # --------------------------------------------------------------------------

@@ -20,12 +20,12 @@ try:
     # Private namespace first: the plugin loads its modules under
     # `research_os_impl.*` so they cannot collide with another plugin's
     # `state.py` and cannot go stale behind a reloaded entry module.
-    from research_os_impl.state import read_claims, read_contradictions, read_map
+    from research_os_impl.state import read_claims, read_contradictions, read_map, read_review
 except ImportError:
     try:
-        from .state import read_claims, read_contradictions, read_map
+        from .state import read_claims, read_contradictions, read_map, read_review
     except ImportError:  # loaded flat inside the Hermes plugin directory
-        from state import read_claims, read_contradictions, read_map  # type: ignore[no-redef]
+        from state import read_claims, read_contradictions, read_map, read_review  # type: ignore[no-redef]
 
 # The phases of a research project, and what thinking each one calls for.
 #
@@ -274,7 +274,36 @@ def _standing(topic: str) -> list[str]:
     task = str(m.get("current_task") or "").strip()
     if task:
         lines.append(f"当前任务：{task}")
+    # The narrative is what we currently believe and why it changed. It is
+    # the answer to "where is this project", and it is the thing a review
+    # compares the work against.
+    narr = str(m.get("narrative") or "").strip()
+    if narr:
+        lines.append(f"当前判断（课题叙事）：{narr}")
+    plan = str(m.get("plan") or "").strip()
+    if plan:
+        lines.append(f"下一步计划：{plan}")
     return lines
+
+
+def review_demand(topic: str, review: dict[str, Any] | None = None) -> list[str]:
+    """Ask for the review, when a review is due.
+
+    A review that fires every turn is a nag and gets ignored; one that
+    fires on a counter is a checkpoint. The counters are per topic: a
+    drift that takes three turns to appear is not visible in any one of
+    them, so the review has to look at the topic, not the turn.
+    """
+    r = review or read_review(topic)
+    if r.get("paused"):
+        return [
+            "这个课题现在处于暂停状态：上一次全局审查判定工作已经偏离核心问题。",
+            "先别继续检索。先想清楚：这个课题现在到底在回答什么、"
+            "手上这些材料说明了什么、下一步要做什么，"
+            "用 research_mode(action='set_state', ...) 把叙事和计划改掉，"
+            "再回来检索。",
+        ]
+    return []
 
 
 def _alignment(topic: str) -> list[str]:

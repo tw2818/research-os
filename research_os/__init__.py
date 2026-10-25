@@ -161,8 +161,9 @@ TOOL_SCHEMA: dict[str, Any] = {
         "different way of thinking, and the phase changes how the next turn is worked on), and "
         "'current_task' (what is being done right now). ACTION 'review' records a global review - "
         "whether the work is still serving the core question, with a verdict "
-        "(on_track | drifting | off_track) and the reason. A project can drift without any single "
-        "claim being wrong, so the alignment is recorded explicitly. "
+        "(continue | redirect | pause) and the reason. A project can drift without any single "
+        "claim being wrong, so the alignment is checked explicitly; a 'pause' verdict stops "
+        "the literature searching until ACTION 'set_state' says where the work is going. "
         "Call 'on' when the user asks why something happens, whether evidence can "
         "separate explanations, for a literature review, for a hypothesis, or when a "
         "claim needs verification. Do NOT call for chores: file conversion, imports, "
@@ -261,11 +262,37 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "drifts away from the core question without anyone noticing."
                 ),
             },
+            "narrative": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': what we currently believe, and why it "
+                    "changed. This is the topic's story - update it when the "
+                    "evidence moves the picture, not only when the ledger grows."
+                ),
+            },
+            "plan": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': what happens next, in one line. Setting "
+                    "it lifts a pause: a review that stopped the work is answered "
+                    "by saying where the work is going."
+                ),
+            },
             "verdict": {
                 "type": "string",
                 "description": (
-                    "For action 'review': on_track | drifting | off_track. Whether "
-                    "the work is still serving the core question."
+                    "For action 'review': continue | redirect | pause. Whether the "
+                    "work is still serving the core question, and what to do about it. "
+                    "'pause' and 'off_track' stop the literature searching until "
+                    "set_state says where the work is going - so a review that finds "
+                    "drift has to be answered, not just recorded."
+                ),
+            },
+            "direction_changed": {
+                "type": "boolean",
+                "description": (
+                    "For action 'review': true when this round's evidence changed the "
+                    "direction - the interpretation, not just the amount of material."
                 ),
             },
             "review_note": {
@@ -626,11 +653,15 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             goal = args.get("goal")
             phase = args.get("phase")
             task = args.get("current_task")
-            if goal is None and phase is None and task is None:
+            narrative = args.get("narrative")
+            plan = args.get("plan")
+            if all(x is None for x in (goal, phase, task, narrative, plan)):
                 return fail(
                     "give at least one of: goal (what this project is trying "
                     "to get at), phase (scoping/evidence/weighing/closing/"
-                    "writing), current_task (what is being done right now)"
+                    "writing), current_task (what is being done right now), "
+                    "narrative (what we currently believe and why it changed), "
+                    "plan (what happens next)"
                 )
             if phase is not None:
                 key = str(phase).strip()
@@ -645,7 +676,15 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 goal=goal,
                 phase=phase,
                 current_task=task,
+                narrative=narrative,
+                plan=plan,
             )
+            # Updating the standing is what lifts a pause: the review said
+            # the work had drifted, and the agent has now said where it is
+            # going. That closes the loop, and the searching can resume.
+            was_paused = _state.topic_is_paused(project)
+            if was_paused:
+                _state.clear_pause(project)
             if phase is not None and str(phase).strip() != before:
                 _state.record_phase_change(
                     project, before, str(phase).strip(), str(args.get("note") or "")
@@ -655,6 +694,9 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "goal": m.get("goal"),
                     "phase": m.get("phase"),
                     "current_task": m.get("current_task"),
+                    "narrative": m.get("narrative"),
+                    "plan": m.get("plan"),
+                    "resumed": was_paused,
                 }
             )
 
@@ -667,7 +709,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             verdict = str(args.get("verdict") or "").strip()
             if not verdict:
                 return fail(
-                    "verdict is required: on_track | drifting | off_track"
+                    "verdict is required: continue | redirect | pause"
                 )
             note = str(args.get("review_note") or args.get("note") or "").strip()
             if not note:
@@ -687,7 +729,23 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             reviews.append(entry)
             m["reviews"] = reviews[-20:]
             _state.write_map(project, m)
-            return ok({"review": entry, "reviews": len(m["reviews"])})
+            # The verdict has to be able to stop the work. A "pause" or
+            # "off_track" blocks further searching until the state says
+            # where the work is going.
+            rv = _state.record_review(
+                project,
+                verdict,
+                reason=note,
+                direction_changed=bool(args.get("direction_changed")),
+            )
+            return ok(
+                {
+                    "review": entry,
+                    "reviews": len(m["reviews"]),
+                    "paused": bool(rv.get("paused")),
+                    "searches_since_review": int(rv.get("searches_since_review") or 0),
+                }
+            )
 
         if action == "hypothesis":
             # A hypothesis is not a claim: it has no source and is not yet
@@ -778,6 +836,12 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
         _state.mark_turn(session_id, turn_id=turn_id, synthetic=synthetic)
         if synthetic:
             return None
+        # Count the turn against the pending review. A drift that takes
+        # several turns to appear is not visible in any one of them.
+        _prev = _state.read_session(session_id)
+        _topic = str(_prev.get("topic") or "")
+        if _topic and _prev.get("mode") == "research":
+            _state.note_turn_since_review(_topic)
 
         s = _state.read_session(session_id)
         mode = s.get("mode", "idle")
@@ -812,6 +876,20 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             directed = _direction_note(topic)
             if directed:
                 ctx = f"{ctx}\n\n{directed}"
+            # Close the loop: did the last turn advance the question, and
+            # is more input still worth it.
+            cycle = _cycle_check(topic, previous_activity)
+            if cycle:
+                ctx = f"{ctx}\n\n{cycle}"
+            # The request may belong to a different phase than the topic is
+            # in. Naming it is not refusing it.
+            fit = _phase_fit_note(topic, message)
+            if fit:
+                ctx = f"{ctx}\n\n{fit}"
+            # A paused topic says so, and says what to do instead.
+            demand = _protocol.review_demand(topic)
+            if demand:
+                ctx = f"{ctx}\n\n" + "\n".join(demand)
             # The map has competing explanations but nothing separating them,
             # or has judgments but no record of what is still open. The
             # protocol block is capped, so this goes in only when there is
@@ -899,6 +977,189 @@ def _map_gaps(topic: str) -> list[str]:
         return wants
     except Exception:
         return []
+
+
+# The cycle check: what this turn actually did, against what the topic is
+# for.
+#
+# The question it answers is the one a researcher asks at the end of a
+# stretch of work: did this advance the thing we are trying to find out, or
+# did it accumulate material around a question we have moved past? A
+# session can search forty times, produce a full ledger, and have gone
+# nowhere - the evidence is there and the direction is gone.
+#
+# The signals are countable, not felt:
+#   - the work added claims but no explanation and no separating evidence
+#   - the searches went to a different sub-question than the current task
+#   - a lot came in and nothing was decided
+#
+# What it produces is a verdict the agent has to answer to, not a note it
+# can nod at.
+# Which requests belong to which phase.
+#
+# The point is not to refuse them. A request that belongs to another phase
+# may be a better question than the one the topic is in, and the agent is
+# entitled to notice that and change the phase. What it must not do is
+# answer the request without noticing - because "answer the last thing you
+# were asked" is exactly how a session drifts while every individual
+# answer looks reasonable.
+_PHASE_FIT: dict[str, tuple[tuple[str, ...], str]] = {
+    "scoping": (
+        ("再查", "再搜", "多找几篇", "继续搜", "找更多文献", "再多找", "搜一下文献"),
+        "这轮是界定问题，还在找证据。",
+    ),
+    "evidence": (
+        ("怎么定义", "问题该怎么问", "换个问法", "重新表述问题"),
+        "这轮是搜集证据，已经在定义了。",
+    ),
+    "weighing": (
+        ("帮我写", "写成一段", "润色", "起草", "写成论文", "写成段落"),
+        "这轮是权衡解释，还没到成文。",
+    ),
+    "closing": (
+        ("再找", "再搜", "继续找文献", "多找点文献", "再多找几篇"),
+        "这轮是收束结论，新增证据可能推翻结论——如果要找，说清它可能改变什么。",
+    ),
+    "writing": (
+        ("再查", "再搜", "继续找文献"),
+        "这轮是成文表达，新增证据会牵动全文结构。",
+    ),
+}
+
+
+def _phase_fit_note(topic: str, message: str) -> str | None:
+    """Name a request that belongs to a different phase than the topic is in.
+
+    Nothing is refused. The agent is working on a question, and the
+    question decides which action makes sense - so a request that does not
+    fit the phase is worth one sentence, and the agent may well decide the
+    request is the better question and move the phase.
+    """
+    try:
+        m = _state.read_map(topic)
+        phase = str(m.get("phase") or "").strip()
+        if not phase:
+            return None
+        entry = _PHASE_FIT.get(phase)
+        if not entry:
+            return None
+        markers, note = entry
+        low = str(message or "").lower()
+        if not any(mk.lower() in low for mk in markers):
+            return None
+        task = str(m.get("current_task") or "").strip()
+        return (
+            f"[Research OS · 请求和当前阶段不太一样]\n"
+            f"{note}"
+            + (f"当前任务是「{task[:50]}」。" if task else "")
+            + "先想清楚：照这个请求做，还是先把它放回课题的顺序里？"
+            "两者都合理，选了就说一声。"
+        )
+    except Exception:
+        return None
+
+
+def _cycle_check(topic: str, activity: dict[str, Any]) -> str | None:
+    """Ask the agent to close the loop, when the loop looks open.
+
+    Returns the text to inject, or None when there is nothing to ask.
+    """
+    try:
+        m = _state.read_map(topic)
+        core = str(m.get("core_question") or "").strip()
+        task = str(m.get("current_task") or "").strip()
+        narrative = str(m.get("narrative") or "").strip()
+        if not core and not task:
+            return None
+
+        evidence = int(activity.get("evidence") or 0)
+        moves = int(activity.get("moves") or 0)
+        claims = int(activity.get("ledger") or 0)
+
+        lines: list[str] = []
+
+        # A lot came in and nothing was decided. Material without a
+        # decision is the shape of a report, and it is the state the
+        # narrative is supposed to prevent.
+        if evidence >= 3 and moves == 0 and not narrative:
+            lines.append(
+                f"这一轮检索了 {evidence} 次，但没有推进任何解释，也没有写下现在"
+                f"怎么看这个课题。材料越堆越多而判断没有形成，"
+                f"课题就会变成一份文献清单。"
+                f"先说清目前认为什么、哪些解释还活着，再继续找。"
+            )
+
+        # The work went somewhere other than the current task. The search
+        # terms are not in the command that ran, so the check is on the
+        # subject of the claims: a claim about something the current task
+        # does not mention is a sign the work wandered.
+        if task and claims >= 3:
+            task_terms = _content_terms(task)
+            recent = _state.read_claims(topic)[-claims:]
+            if task_terms:
+                off = 0
+                for c in recent:
+                    terms = _content_terms(str(c.get("content") or ""))
+                    if terms and not (terms & task_terms):
+                        off += 1
+                if off >= 2:
+                    lines.append(
+                        f"这一轮有 {off} 条断言跟当前任务「{task[:40]}」说的不是一回事。"
+                        f"先确认：现在做的这件事，还是核心问题「{core[:40]}」要的吗？"
+                        f"如果当前任务本身已经不对，改任务或改阶段，别继续往这个方向堆。"
+                    )
+
+        # A review is due by count. A drift that takes several turns to
+        # appear is not visible in any one of them.
+        review = _state.read_review(topic)
+        if not review.get("paused"):
+            searches = int(review.get("searches_since_review") or 0)
+            turns = int(review.get("turns_since_review") or 0)
+            if searches >= 8 or turns >= 6:
+                lines.append(
+                    f"这个课题已经积累了 {searches} 次检索、{turns} 轮工作，"
+                    f"该做一次全局审查了："
+                    f"（a）这些材料有没有改变原来的判断？"
+                    f"（b）现在的方向还服务核心问题吗？"
+                    f"（c）继续输入还值得吗，还是该收手？"
+                    f"用 research_mode(action='review', project='{topic}', "
+                    f"verdict='continue|redirect|pause', review_note='<理由>') 记下来，"
+                    f"判 redirect/pause 就同时用 action='set_state' 更新叙事和计划。"
+                )
+
+        if not lines:
+            return None
+        return (
+            "[Research OS · 这一轮要收口]\n" + "\n".join(lines)
+        )
+    except Exception:
+        return None
+
+
+_STOPWORDS = {
+    "的", "了", "和", "与", "在", "是", "有", "对", "从", "到", "被", "把",
+    "而", "及", "或", "这", "那", "个", "们", "什么", "怎么", "如何", "为什么",
+    "the", "a", "an", "of", "in", "to", "and", "or", "is", "are", "for", "on",
+    "with", "by", "that", "this", "it", "be", "as", "at", "from",
+}
+
+
+def _content_terms(text: str) -> set[str]:
+    """The content words of a piece of text, for a rough overlap check."""
+    out: set[str] = set()
+    for raw in str(text or "").split():
+        w = raw.strip("\uFF0C\u3002\uFF1B\uFF1A\u3001\uFF1F\uFF01\uFF08\uFF09()[]{}.,;:?!-\u2014\u2026\u00b7").lower().strip(chr(34) + chr(39) + chr(96))
+        if len(w) < 2 or w in _STOPWORDS:
+            continue
+        out.add(w)
+    # Chinese has no spaces, so fall back to character bigrams.
+    cjk = "".join(ch for ch in str(text or "") if "\u4e00" <= ch <= "\u9fff")
+    if cjk:
+        for i in range(len(cjk) - 1):
+            bg = cjk[i:i + 2]
+            if bg not in _STOPWORDS:
+                out.add(bg)
+    return out
 
 
 def _direction_note(topic: str) -> str:
@@ -1212,10 +1473,29 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         session_id = str(kwargs.get("session_id") or "unknown")
         s = _state.read_session(session_id)
         if s.get("mode") == "research" and s.get("topic"):
+            topic = str(s.get("topic") or "")
+            # A review that paused the topic stops the searching. Not as a
+            # warning - as a block - until the state says where the work is
+            # going. A review that cannot stop anything is a note in a
+            # margin.
+            if _state.topic_is_paused(topic):
+                review = _state.read_review(topic)
+                return {
+                    "action": "block",
+                    "message": (
+                        f"这个课题现在暂停检索：上一次全局审查判定工作已经偏离核心问题"
+                        f"（理由：{review.get('last_reason') or '未记录'}）。\n"
+                        f"继续往这个方向搜只会让材料更多、判断更少。\n"
+                        f"先用 research_mode(action='set_state', project='{topic}', "
+                        f"narrative='<现在认为什么>', plan='<下一步做什么>') "
+                        f"更新课题叙事和计划（或 action='review' 判 'continue' 继续），"
+                        f"再检索。"
+                    ),
+                }
             # The topic is open. A run that searches forever and never answers
             # is the failure this catches: interrupt, ask for a record or a
             # conclusion, then let the work continue.
-            return _convergence_check(session_id, str(s.get("topic") or ""))
+            return _convergence_check(session_id, topic)
 
         # pre_tool_call cannot see the user message or the conversation. The
         # turn's synthetic/not verdict was recorded by pre_llm_call, which runs
@@ -1284,6 +1564,7 @@ def _post_tool_call(**kwargs: Any) -> None:
             topic = str(s.get("topic") or "")
             if topic and s.get("mode") == "research":
                 _state.note_topic_search(topic, tool_name)
+                _state.note_search_since_review(topic)
         return None
     except Exception:
         return None

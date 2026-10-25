@@ -218,6 +218,8 @@ def read_map(topic: str) -> dict[str, Any]:
 MAP_GOAL = "goal"
 MAP_PHASE = "phase"
 MAP_TASK = "current_task"
+MAP_NARRATIVE = "narrative"
+MAP_PLAN = "plan"
 
 
 def read_goal(topic: str) -> str:
@@ -235,13 +237,32 @@ def read_current_task(topic: str) -> str:
     return str(read_map(topic).get(MAP_TASK) or "").strip()
 
 
+def read_narrative(topic: str) -> str:
+    """The current story of the topic: what we think, and why it changed."""
+    return str(read_map(topic).get(MAP_NARRATIVE) or "").strip()
+
+
+def read_plan(topic: str) -> str:
+    """What happens next."""
+    return str(read_map(topic).get(MAP_PLAN) or "").strip()
+
+
 def write_state(
     topic: str,
     goal: str | None = None,
     phase: str | None = None,
     current_task: str | None = None,
+    narrative: str | None = None,
+    plan: str | None = None,
 ) -> dict[str, Any]:
-    """Update the topic's standing, keeping the fields not being changed."""
+    """Update the topic's standing, keeping the fields not being changed.
+
+    The narrative and the plan are here because a direction change has to
+    be written down somewhere, not just felt. When a review finds that the
+    work has drifted, the narrative says what we now think and the plan
+    says what follows; without them the next session reads the ledger and
+    infers a direction that was never chosen.
+    """
     m = read_map(topic)
     if goal is not None:
         m[MAP_GOAL] = str(goal).strip()
@@ -249,8 +270,113 @@ def write_state(
         m[MAP_PHASE] = str(phase).strip()
     if current_task is not None:
         m[MAP_TASK] = str(current_task).strip()
+    if narrative is not None:
+        m[MAP_NARRATIVE] = str(narrative).strip()
+    if plan is not None:
+        m[MAP_PLAN] = str(plan).strip()
     write_map(topic, m)
     return m
+
+
+# --------------------------------------------------------------------------
+# the review loop
+# --------------------------------------------------------------------------
+#
+# A topic is reviewed: the agent looks at where the work has got to, asks
+# whether it is still serving the core question, and decides whether to
+# continue, redirect, or stop. The decision has to be able to bite, or it
+# is a suggestion - so a review that says "pause" sets a flag that blocks
+# further literature searching until the state is updated.
+#
+# The counters are per topic, not per turn. A drift that takes three turns
+# to appear is not visible in any one of them.
+
+REVIEW_FILE = "review.json"
+
+_REVIEW_DEFAULTS: dict[str, Any] = {
+    "reviews": 0,
+    "searches_since_review": 0,
+    "turns_since_review": 0,
+    "paused": False,
+    "last_verdict": "",
+    "last_reason": "",
+    "last_at": 0.0,
+}
+
+
+def read_review(topic: str) -> dict[str, Any]:
+    d = topic_dir(topic)
+    if not d.is_dir():
+        return dict(_REVIEW_DEFAULTS)
+    data = _read_json(d / REVIEW_FILE, {})
+    out = dict(_REVIEW_DEFAULTS)
+    if isinstance(data, dict):
+        out.update(data)
+    return out
+
+
+def write_review(topic: str, data: dict[str, Any]) -> None:
+    d = topic_dir(topic)
+    d.mkdir(parents=True, exist_ok=True)
+    data = {**_REVIEW_DEFAULTS, **(data or {})}
+    data["updated_at"] = now()
+    _write_json(d / REVIEW_FILE, data)
+
+
+def note_search_since_review(topic: str) -> int:
+    """Count a literature search against the pending review."""
+    d = read_review(topic)
+    d["searches_since_review"] = int(d.get("searches_since_review") or 0) + 1
+    write_review(topic, d)
+    return int(d["searches_since_review"])
+
+
+def note_turn_since_review(topic: str) -> int:
+    d = read_review(topic)
+    d["turns_since_review"] = int(d.get("turns_since_review") or 0) + 1
+    write_review(topic, d)
+    return int(d["turns_since_review"])
+
+
+def topic_is_paused(topic: str) -> bool:
+    return bool(read_review(topic).get("paused"))
+
+
+def record_review(
+    topic: str,
+    verdict: str,
+    reason: str = "",
+    direction_changed: bool = False,
+) -> dict[str, Any]:
+    """Record a review and act on its verdict.
+
+    A verdict of "pause" or "redirect" stops the literature searching. Not
+    as a warning - as a block - until the state is updated to say where the
+    work is going. A review that cannot stop anything is a note in a
+    margin.
+    """
+    d = read_review(topic)
+    v = str(verdict or "").strip().lower()
+    d["reviews"] = int(d.get("reviews") or 0) + 1
+    d["last_verdict"] = v
+    d["last_reason"] = str(reason or "")
+    d["last_at"] = now()
+    d["searches_since_review"] = 0
+    d["turns_since_review"] = 0
+    # Only a verdict that found the work off the core question pauses it.
+    # "continue" and "adjust" both keep the work going; "adjust" means the
+    # direction is being changed and the state says so.
+    d["paused"] = v in ("pause", "off_track")
+    d["direction_changed"] = bool(direction_changed)
+    write_review(topic, d)
+    return d
+
+
+def clear_pause(topic: str) -> dict[str, Any]:
+    d = read_review(topic)
+    d["paused"] = False
+    write_review(topic, d)
+    return d
 
 
 def record_phase_change(topic: str, from_phase: str, to_phase: str, note: str = "") -> None:

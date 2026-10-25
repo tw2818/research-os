@@ -1318,6 +1318,171 @@ def test_an_unknown_phase_is_refused():
     assert "nonsense" in str(out), out
 
 
+def test_a_request_from_another_phase_is_named_not_refused():
+    """The agent is working on a question, not obeying each local request
+    literally. A request that belongs to another phase may be the better
+    question - but it has to be noticed, because answering the last thing
+    you were asked is how a session drifts while every answer looks
+    reasonable."""
+    m = _handler()
+    sid = "t-fit"
+    m._tool_handler(
+        {"action": "create", "project": "FitTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "FitTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "FitTopic",
+            "goal": "g",
+            "current_task": "compare the two explanations",
+            "phase": "weighing",
+        },
+        session_id=sid,
+    )
+    # A request that belongs to the writing phase.
+    out = m._pre_llm_call(
+        session_id=sid, user_message="帮我把这个写成一段话", turn_id="t1"
+    )
+    assert out is not None
+    assert "阶段" in out["context"]
+    # And the request is not blocked - the agent may well prefer it.
+    blocked = m._pre_tool_call(
+        tool_name="write_file",
+        session_id=sid,
+        turn_id="t1",
+        args={"path": "/tmp/x.md", "content": "y"},
+    )
+    assert blocked is None or blocked.get("action") != "block", blocked
+
+
+def test_a_pause_verdict_stops_the_searching():
+    """A review that cannot stop anything is a note in a margin.
+
+    The verdict has to bite: the search is blocked until the state says
+    where the work is going.
+    """
+    m = _handler()
+    sid = "t-pause"
+    m._tool_handler(
+        {"action": "create", "project": "PauseTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "PauseTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "review",
+            "project": "PauseTopic",
+            "verdict": "pause",
+            "review_note": "在查干预研究，核心问题其实是病因",
+        },
+        session_id=sid,
+    )
+    assert state.topic_is_paused("PauseTopic")
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        session_id=sid,
+        turn_id="t1",
+    )
+    assert out is not None
+    assert out.get("action") == "block"
+    assert "暂停" in out["message"]
+
+
+def test_updating_the_standing_lifts_the_pause():
+    """The loop has to close: review says pause, the agent answers by saying
+    where the work is going, and the searching resumes."""
+    m = _handler()
+    sid = "t-resume"
+    m._tool_handler(
+        {"action": "create", "project": "ResumeTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ResumeTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "review",
+            "project": "ResumeTopic",
+            "verdict": "pause",
+            "review_note": "跑偏了",
+        },
+        session_id=sid,
+    )
+    assert state.topic_is_paused("ResumeTopic")
+    out = m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "ResumeTopic",
+            "narrative": "现在认为残留缺损以药物混杂为主",
+            "plan": "去查未用药亚组的数据",
+        },
+        session_id=sid,
+    )
+    assert "resumed" in str(out), out
+    assert not state.topic_is_paused("ResumeTopic")
+    blocked = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        session_id=sid,
+        turn_id="t2",
+    )
+    assert blocked is None or blocked.get("action") != "block", blocked
+
+
+def test_the_cycle_check_asks_for_a_judgment_when_only_material_accumulated():
+    """Evidence without a decision is the shape of a report. The check fires
+    on the count, so it is a checkpoint and not a nag."""
+    m = _handler()
+    sid = "t-cycle"
+    m._tool_handler(
+        {"action": "create", "project": "CycleTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "CycleTopic"}, session_id=sid)
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    for _ in range(4):
+        m._post_tool_call(
+            tool_name="mcp__pubmed__pubmed_search_articles",
+            session_id=sid,
+            turn_id="t1",
+        )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
+    assert out is not None
+    assert "判断" in out["context"]
+
+
+def test_a_review_is_asked_for_after_enough_accumulation():
+    """A drift that takes several turns to appear is not visible in any one
+    of them, so the review looks at the topic, not the turn."""
+    m = _handler()
+    sid = "t-reviewdue"
+    m._tool_handler(
+        {"action": "create", "project": "ReviewDue", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "ReviewDue"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "ReviewDue",
+            "goal": "g",
+            "current_task": "t",
+            "phase": "weighing",
+        },
+        session_id=sid,
+    )
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    for _ in range(9):
+        m._post_tool_call(
+            tool_name="mcp__pubmed__pubmed_search_articles",
+            session_id=sid,
+            turn_id="t1",
+        )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
+    assert out is not None
+    assert "全局审查" in out["context"]
+
+
 def test_a_global_review_is_recorded():
     m = _handler()
     m._tool_handler(

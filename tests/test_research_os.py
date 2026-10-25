@@ -2235,6 +2235,200 @@ def test_the_installer_writes_the_pointer_file():
     assert "STATE_HOME=\"${RESEARCH_OS_HOME:-" not in src
 
 
+def _tool(**args):
+    """Call the tool the way the agent does.
+
+    The plugin is loaded by path, so the test has to use the same
+    instance the hooks use - the one `_handler()` returns. Importing
+    `research_os` instead gives a second copy of the module with its
+    own state, and the call behaves differently.
+
+    A successful call returns the payload; a failed one returns
+    {"ok": False, "error": ...}.
+    """
+    m = _handler()
+    import json
+    out = m._tool_handler(args, session_id="s-test")
+    if isinstance(out, str):
+        out = json.loads(out)
+    return out
+
+
+def test_a_sub_topic_sees_its_parent_and_its_siblings():
+    """A cross-domain review is several sub-questions under one
+    question.
+
+    Topics are isolated on purpose - one topic's hypotheses must not
+    leak into another. But a sub-topic that cannot see the others
+    cannot know that two of them touch the same evidence, and a review
+    that does not know that will make the same point twice or leave a
+    gap between the parts.
+
+    The parent gives the sub-topic the question it serves and the
+    siblings it shares. It does not give it their hypotheses or their
+    ledger, and that is the line: a hypothesis that leaks across is how
+    a review ends up arguing for a position it never checked.
+    """
+    parent = "Review-Domain"
+    a = "Sub-A"
+    b = "Sub-B"
+    for name, q in ((parent, "what is the whole domain asking?"),
+                    (a, "what does the first part ask?"),
+                    (b, "what does the second part ask?")):
+        if not state.topic_exists(name):
+            _tool(action="create", project=name, core_question=q)
+    _tool(action="set_state", project=a, parent=parent, phase="evidence")
+    _tool(action="set_state", project=b, parent=parent, phase="scoping")
+
+    par = state.read_parent(a)
+    assert par["name"] == parent
+    assert par["core_question"] == "what is the whole domain asking?"
+
+    sibs = {x["name"] for x in state.read_siblings(a)}
+    assert sibs == {b}, sibs
+    assert {x["name"] for x in state.read_children(parent)} == {a, b}
+
+    # The standing carries the question and the siblings.
+    block = protocol.build_research_block(a, {"max_inject_chars": 1600})
+    assert parent in block
+    assert b in block
+
+    # And the sibling's hypotheses do not come across.
+    _tool(action="set_state", project=b, narrative="the second part thinks X")
+    block2 = protocol.build_research_block(a, {"max_inject_chars": 1600})
+    assert "the second part thinks X" not in block2
+
+    # A parent that does not exist is refused.
+    out = _tool(action="set_state", project=a, parent="No-Such-Topic")
+    assert "error" in out, out
+    # A topic cannot be its own parent.
+    out2 = _tool(action="set_state", project=a, parent=a)
+    assert "error" in out2, out2
+
+
+def test_the_rules_survive_a_long_standing():
+    """A project with a long narrative used to take the whole injection
+    budget, and the thinking rules were cut out of the block.
+
+    The block then said what the project was and nothing about how to
+    work on it - a status report. The rules are reserved first and the
+    standing is cut to fit, because the standing is in the topic file
+    and the rules are nowhere else.
+    """
+    name = "T-long"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    state.create_topic(name, "Q?", ["H1"], ["test"])
+    long_narrative = (
+        "判断已定。结论：这个问题的答案在现有证据下不能定。"
+        + "理由一：方向分不开，需要纵向时序与随机操纵，两者都缺。" * 12
+        + "理由二：测量混着方法差异，现有工具不足以拆开。" * 12
+        + "理由三：样本量不够，任何交互效应都估不稳。" * 12
+    )
+    state.write_state(
+        name,
+        phase="closing",
+        narrative=long_narrative,
+        plan="下一步：做一次必要中介实验。" * 20,
+        current_task="把结论写成可发表的表述边界",
+    )
+    block = protocol.build_research_block(name, {"max_inject_chars": 1600})
+    assert len(block) <= 1600, len(block)
+    # The rules are in.
+    assert "问准" in block, "the thinking rules were cut out of the block"
+    assert "research_mode(action='claim'" in block, "the tool call was cut out"
+    # And the standing is there, cut rather than dropped.
+    assert "当前判断（课题叙事）：" in block, "the narrative was dropped whole"
+    assert "下一步计划：" in block, "the plan was dropped whole"
+    assert "全文见课题文件" in block, "the cut was not visible"
+
+
+def test_the_strictness_follows_the_phase():
+    """The evidence discipline is the floor and it never moves. What moves
+    is how hard the answer is pushed to commit.
+
+    A model that must always have a position answers an open question
+    with a position - so the exploration stage produces conclusions
+    nobody checked, and the narrowing stage has nothing left to narrow.
+    The discipline has to be staged too, or it enforces the same shape
+    at every moment of a project whose moments are not the same.
+    """
+    assert protocol.phase_strictness("scoping") == "open"
+    assert protocol.phase_strictness("diverging") == "open"
+    assert protocol.phase_strictness("evidence") == "mixed"
+    assert protocol.phase_strictness("weighing") == "mixed"
+    assert protocol.phase_strictness("closing") == "tight"
+    assert protocol.phase_strictness("writing") == "tight"
+
+
+def test_an_open_phase_does_not_demand_a_position():
+    """In a diverging phase the right answer has no position in it yet. So
+    the check that demands one has to let the open phases through.
+    """
+    m = _handler()
+    name = "T-open"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler(
+        {"action": "create", "project": name, "core_question": "Q?"},
+        session_id="t-open",
+    )
+    m._tool_handler(
+        {"action": "on", "project": name}, session_id="t-open"
+    )
+    m._tool_handler(
+        {"action": "set_state", "project": name, "phase": "diverging"},
+        session_id="t-open",
+    )
+    # Three directions, none of them a position.
+    answer = (
+        "有三个方向可以考虑。第一个是上游的代谢通路，"
+        "第二个是中枢的炎症通路，第三个是行为层面的解释路径。"
+        "现在还不知道哪个更值得先查。"
+    )
+    out = m._transform_llm_output(
+        response_text=answer, session_id="t-open"
+    )
+    assert out is None, out
+
+    # The same answer in a closing phase is a different answer: a
+    # conclusion with no position in it is not a conclusion.
+    m._tool_handler(
+        {"action": "set_state", "project": name, "phase": "closing"},
+        session_id="t-open",
+    )
+    out2 = m._transform_llm_output(
+        response_text=answer, session_id="t-open"
+    )
+    assert out2 is not None, "a closing phase must demand a position"
+
+
+def test_the_open_phases_do_not_forbid_exploration():
+    """Two things an open phase used to forbid, and research does not.
+
+    Reaching a conclusion: the evidence may already point one way, and
+    saying so is not a failure of the phase.
+
+    Changing the question: a question the evidence has disproven does not
+    become a settled question, it becomes a wrong one. Forbidding the
+    change is what makes a project defend a question it has lost.
+    """
+    ev = protocol.PHASES["evidence"]["gate"]
+    assert "不改问题" not in ev, ev
+    assert "不下结论" not in ev, ev
+    dv = protocol.PHASES["diverging"]["gate"]
+    assert "不下结论" not in dv, dv
+
+
+def test_the_rules_allow_a_bold_hypothesis():
+    """A hedge that was never stated is not progress. The rules have to
+    say that a bold marked hypothesis is worth more than a cautious one.
+    """
+    rules = protocol.THINKING_RULES
+    assert "假说" in rules, rules
+    assert "大胆" in rules, rules
+
+
 def test_research_is_recognised_outside_the_lab_bench():
     """The classifier decides whether the research block is injected at
     all, and its word list was mostly biomedical and statistical: p

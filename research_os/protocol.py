@@ -20,12 +20,33 @@ try:
     # Private namespace first: the plugin loads its modules under
     # `research_os_impl.*` so they cannot collide with another plugin's
     # `state.py` and cannot go stale behind a reloaded entry module.
-    from research_os_impl.state import read_claims, read_contradictions, read_map, read_review
+    from research_os_impl.state import (
+        read_claims,
+        read_contradictions,
+        read_map,
+        read_parent,
+        read_review,
+        read_siblings,
+    )
 except ImportError:
     try:
-        from .state import read_claims, read_contradictions, read_map, read_review
+        from .state import (
+            read_claims,
+            read_contradictions,
+            read_map,
+            read_parent,
+            read_review,
+            read_siblings,
+        )
     except ImportError:  # loaded flat inside the Hermes plugin directory
-        from state import read_claims, read_contradictions, read_map, read_review  # type: ignore[no-redef]
+        from state import (  # type: ignore[no-redef]
+            read_claims,
+            read_contradictions,
+            read_map,
+            read_parent,
+            read_review,
+            read_siblings,
+        )
 
 # The phases of a research project, and what thinking each one calls for.
 #
@@ -51,6 +72,7 @@ except ImportError:
 PHASES: dict[str, dict[str, str]] = {
     "scoping": {
         "name": "界定问题",
+        "strictness": "open",
         "thinking": (
             "这轮在界定问题，别急着找证据。要回答的科学问题是什么？"
             "为什么这个答案会有用？有哪些可能的问题问法？选哪个，代价是什么？"
@@ -66,6 +88,7 @@ PHASES: dict[str, dict[str, str]] = {
     },
     "diverging": {
         "name": "放开框架",
+        "strictness": "open",
         "thinking": (
             "这轮在放开框架。主动找当前框架的反例：什么材料会推翻现在的说法？"
             "有没有完全不同的问法？哪些材料是被当前框架当成理所当然、但其实没验证过的？"
@@ -75,12 +98,15 @@ PHASES: dict[str, dict[str, str]] = {
             "给出候选的新框架或新问法，以及能把它和当前框架分开的那个判据（材料、检验或推理都行）。"
         ),
         "gate": (
-            "这一阶段不收口、不下结论、不改问题。"
-            "发散出来的是值得去查的线索，不是结论——查完回 evidence 阶段去查。"
+            "这一阶段不收口。发散出来的是值得去查的线索，不是结论——"
+            "查完回 evidence 阶段去查。"
+            "但不必为了不收口而把自己削平：大胆提一个明确标记的假说，"
+            "哪怕现在只有弱支持；被否掉的想法也是进展。"
         ),
     },
     "evidence": {
         "name": "搜集证据",
+        "strictness": "mixed",
         "thinking": (
             "这轮在搜集证据。带着具体问题去找，别漫无目的地捞文献："
             "要找的证据能支持或否定哪个说法？找之前先说清你要看到什么。"
@@ -90,13 +116,15 @@ PHASES: dict[str, dict[str, str]] = {
             "给出这批证据支持什么、不支持什么，一句话结论。"
         ),
         "gate": (
-            "这一阶段只找证据，不下结论，也不改问题。"
-            "找之前先说清你要看到什么——"
-            "如果用户这轮要的是一个判断，说明现在还不到回答的时候。"
+            "这一阶段以找证据为主，但结论和改问题都没有被禁止："
+            "证据已经指向一个答案时直接说，被证据推翻了的问题就改掉——"
+            "用 set_state 带上 core_question 和 question_reason，旧问法会留痕。"
+            "找之前先说清你要看到什么。"
         ),
     },
     "weighing": {
         "name": "权衡解释",
+        "strictness": "mixed",
         "thinking": (
             "这轮在权衡解释。看哪个预测被证实、哪个被削掉。"
             "注意：证据不支持某个解释，和证据支持另一个解释，是两回事——"
@@ -112,6 +140,7 @@ PHASES: dict[str, dict[str, str]] = {
     },
     "closing": {
         "name": "收束结论",
+        "strictness": "tight",
         "thinking": (
             "这轮在收束。结论能说到多强？逐条检查依据够不够。"
             "哪里是推测，哪里是事实，哪里连方向都不确定——分开写。"
@@ -126,6 +155,7 @@ PHASES: dict[str, dict[str, str]] = {
     },
     "writing": {
         "name": "成文表达",
+        "strictness": "tight",
         "thinking": (
             "这轮在写。先说清楚给谁看、他们已经知道什么、看完要知道什么。"
             "少用'研究表明'，直接说是谁、什么设计、什么效应量、什么限制。"
@@ -140,6 +170,43 @@ PHASES: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_PHASE = "weighing"
+
+# How hard each phase pushes toward a stated position.
+#
+# The evidence discipline is the floor and it never moves: a claim with
+# no source is not a claim, whatever the phase. What changes is how hard
+# the answer is pushed to commit.
+#
+# The reason is the failure this project was built against. A model
+# that must always have a position answers an open question with a
+# position - so the exploration stage produces conclusions nobody
+# checked, and the narrowing stage has nothing left to narrow. The
+# discipline has to be staged too, or it enforces the same shape at
+# every moment of a project whose moments are not the same.
+#
+# "open"  - the phase is for possibilities. A position is not required,
+#           and naming a speculative direction is the point.
+# "mixed" - the phase weighs what is there. A position is expected, but
+#           the answer may still say what it does not know.
+# "tight" - the phase commits. A position is required, and its strength
+#           is checked against the ledger.
+PHASE_STRICTNESS = {
+    "scoping": "open",
+    "diverging": "open",
+    "evidence": "mixed",
+    "weighing": "mixed",
+    "closing": "tight",
+    "writing": "tight",
+}
+
+
+def phase_strictness(phase: str) -> str:
+    """How hard this phase pushes toward a stated position."""
+    entry = PHASES.get(str(phase or "").strip())
+    key = str(entry.get("strictness") or "") if entry else ""
+    if not key:
+        key = PHASE_STRICTNESS.get(str(phase or "").strip(), "mixed")
+    return key or "mixed"
 
 
 def phase_thinking(phase: str) -> str:
@@ -218,9 +285,13 @@ THINKING_RULES = """回答前按科研的路子走：
 4. 找陷阱：哪个推论看着成立其实不成立？找出那个还有别的东西也能解释的推论。
 5. 取舍：这一轮只能推进一点，说清推进了哪一点、剩下的为什么先放着。
    不要把所有相关材料都摆出来——摆全了读者拿不到结论。
-6. 标边界：哪里还不确定、哪里只是推测，说出来。
 
-不确定就写不确定。允许答案是"现在还不能定"。
+判断该给的时候给判断：该说现在认为什么，就直说，别用一串限定语把话说到没剩下。
+该探索的时候大胆探索：大胆提一个明确标记的假说，哪怕只有弱支持——
+先被否掉的想法也是进展，被 hedged 掉的想法不是。
+按当前阶段的要求决定这一轮该给判断还是该给可能性。
+
+不确定就写不确定。允许答案是"现在还不能定"——但这是查过之后的结论，不是省事的开场白。
 
 先给判断，再给依据，最后给还缺什么。不要写成条目清单——清单把判断淹了。"""
 
@@ -239,6 +310,42 @@ TURN_DEMAND = """这轮要有新东西，别只复述已有内容。至少做到
 
 SCOPE_RULE = """如果用户这轮要的是操作（转格式、导入、装东西、改代码），直接做，不要讨论研究意义。
 只有用户问研究问题时才按上面的四类断言来写。"""
+
+
+def _ledger_problems(topic: str) -> str:
+    """What is wrong with the ledger, for the phases that are about to commit.
+
+    The checks run all along - a claim with no source is not a claim
+    whatever the phase. But the moment they are shown to the agent
+    matters: an agent that is told its inference is overstated while it
+    is still exploring will weaken the inference, and then the narrowing
+    phase has nothing left to narrow. A hypothesis that was never stated
+    strongly is a hypothesis that never got tested.
+
+    So the report is produced when the work is about to commit, which is
+    when a problem with the ledger actually changes what the reader
+    should believe.
+    """
+    try:
+        from .validate import validate_claims
+    except ImportError:
+        try:
+            from validate import validate_claims  # type: ignore[no-redef]
+        except Exception:
+            return ""
+    try:
+        report = validate_claims(topic)
+    except Exception:
+        return ""
+    errors = report.get("errors") or []
+    if not errors:
+        return ""
+    return (
+        f"账本有 {len(errors)} 条必须修掉的问题"
+        "（证据分级不因为阶段放松而失效）。"
+        "用 action='validate' 看清单，用 action='amend' 改——id 不变、引用不断，"
+        "删掉重记会让指向它的推论全部失效。"
+    )
 
 
 def _claims_digest(topic: str, limit: int = 6) -> str:
@@ -427,6 +534,34 @@ def _standing(topic: str) -> list[str]:
     plan = str(m.get("plan") or "").strip()
     if plan:
         lines.append(f"下一步计划：{plan}")
+
+    # The top topic, and the siblings under it.
+    #
+    # A cross-domain review is several sub-questions under one question.
+    # Each sub-question has its own ledger and its own hypotheses, and
+    # that isolation is deliberate. But the sub-question cannot see the
+    # others, and a review that does not know two of its parts touch the
+    # same evidence will end up making the same point twice, or leaving a
+    # gap between them.
+    #
+    # What comes here is the parent question and what the siblings are
+    # about. Not their hypotheses and not their ledger.
+    parent = read_parent(topic)
+    if parent:
+        lines.append(f"所属总课题：{parent.get('name')}")
+        if parent.get("core_question"):
+            lines.append(f"总课题的核心问题：{parent['core_question']}")
+    siblings = read_siblings(topic)
+    if siblings:
+        listed = "；".join(
+            f"{s['name']}（{s['core_question'][:40] or '尚未写明核心问题'}）"
+            for s in siblings[:5]
+        )
+        lines.append(
+            f"同一总课题下的其他子课题：{listed}。"
+            f"如果两处证据指向同一件事，说出来；"
+            f"各子课题的假设不互相继承。"
+        )
     return lines
 
 
@@ -508,6 +643,13 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         gate = phase_gate(phase)
         if gate:
             lines.append(f"这轮不要做：{gate}")
+        # The ledger report appears in the phases that are about to
+        # commit. Earlier than that, it would only tell the agent to
+        # weaken what it has just proposed.
+        if phase_strictness(phase) == "tight":
+            problems = _ledger_problems(topic)
+            if problems:
+                lines.append(problems)
     # The frame comes next: what the project has already settled and what
     # it has not. It is the part of the map the agent cannot see by
     # looking at the question in front of it, and it is what stops the
@@ -539,6 +681,8 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
     # removes the thing it was protecting.
     cap = int((config or {}).get("max_inject_chars", 1600))
     if len(block) > cap:
+        # The rules are reserved inside _truncate before the standing is
+        # placed, so a long narrative cannot push them out.
         block = _truncate(block, cap)
     return block
 
@@ -554,6 +698,7 @@ _KEEP_PREFIXES = (
     '下一步计划：',
     '这轮要交出的东西：',
     '这轮不要做：',
+    '账本有 ',
     '对齐检查',
     '  课题目标：',
     '  核心问题：',
@@ -574,6 +719,66 @@ _KEEP_PREFIXES = (
     '如果用户这轮',
     '（以上仅属于',
 )
+
+def _rejoin_paragraphs(block: str) -> str:
+    """Put the narrative and the plan back together as single lines.
+
+    They are written as paragraphs - a blank line between them - and the
+    block is cut line by line, so each paragraph of a long narrative
+    became a separate line and the ones that matched no pattern were
+    dropped. The agent saw a conclusion and the start of a reason, with
+    the rest of the reasons gone and nothing to say so.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    buf_prefix = ""
+
+    def flush() -> None:
+        nonlocal buf, buf_prefix
+        if not buf:
+            return
+        out.append(buf_prefix + " ".join(x.strip() for x in buf))
+        buf = []
+        buf_prefix = ""
+
+    # A line that starts its own field. The narrative and the plan are
+    # the two fields with paragraphs, so only their continuation lines
+    # are absorbed - not the next field's header, which was being
+    # swallowed into the plan and lost with it.
+    own_field = re.compile(
+        r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|"
+        r"这轮要交出的东西：|这轮不要做：|对齐检查|已解问题|待解问题|"
+        r"当前最佳解释|候选解释|受质疑的解释|能分开它的证据|竞争解释：|"
+        r"未处理的假设：|如果用户这轮|（以上仅属于|做完整之后用|"
+        r"回答前按科研|账本有|1\.|2\.|3\.|4\.|5\.|6\.|先给判断|不确定就写|"
+        r"该判断该给|该探索的时候|按当前阶段)"
+    )
+
+    for raw in block.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            # A blank line inside a standing field means the field
+            # continues.
+            if buf:
+                buf.append("")
+            continue
+        m = re.match(r"^(当前判断（课题叙事）：|下一步计划：)(.*)$", line)
+        if m:
+            flush()
+            buf_prefix = m.group(1)
+            buf = [m.group(2)]
+            continue
+        if buf and own_field.match(line):
+            flush()
+            out.append(line)
+            continue
+        if buf:
+            buf.append(line)
+            continue
+        out.append(line)
+    flush()
+    return "\n".join(out)
+
 
 def _truncate(block: str, cap: int) -> str:
     """Cut the block to fit, keeping the parts that act rather than the parts
@@ -599,11 +804,21 @@ def _truncate(block: str, cap: int) -> str:
         limit = max(80, min(200, cap // 6))
         return line if len(line) <= limit else line[: limit - 1] + "…"
 
+    def clip_standing(line: str, limit: int) -> str:
+        """Cut a standing line to what the turn can use.
+
+        The narrative and the plan are prose, and prose is written
+        conclusion-first. Cutting the tail keeps the conclusion and the
+        first reason. The full text is in the topic file.
+        """
+        if len(line) <= limit:
+            return line
+        return line[: max(40, limit - 1)] + "…（全文见课题文件）"
+
     blocks = [THINKING_RULES, TURN_DEMAND]
     # A tiny line that survives every cut: naming the tool call. Without it
     # an agent told to "record it" writes into prose, and the ledger stays
     # empty while the answer looks complete.
-    tool_line = "做完整之后用 research_mode(action='claim', project='<课题>', claim={...}) 记下来。"
     # The standing and the alignment check come first: they are what the
     # turn is for, and the rules are how to work on it. Losing the standing
     # to keep a rule inverts the block.
@@ -664,10 +879,32 @@ def _truncate(block: str, cap: int) -> str:
 
     kept: list[str] = []
     used = 0
+    # The narrative and the plan are paragraphs. Rejoin them so each is
+    # clipped as a whole piece of prose, and so a cut is visible.
+    block = _rejoin_paragraphs(block)
     lines = block.split("\n")
     second: list[str] = []
     third: list[str] = []
     settled: list[str] = []
+
+    # The rules are reserved before anything else is placed. The
+    # standing is what the turn is about and it is in the topic file;
+    # the rules are what change how the agent works and they are
+    # nowhere else. So when the two compete, the standing is the one
+    # that gets cut.
+    tool_line = "做完整之后用 research_mode(action='claim', project='<课题>', claim={...}) 记下来。"
+    rules_cost = sum(len(b) + 1 for b in blocks)
+    think_cost = len(blocks[0]) + 1
+    tool_cost = len(tool_line) + 1
+    reserved = rules_cost if rules_cost + 400 <= cap else (think_cost + tool_cost)
+    standing_budget = max(0, cap - reserved - 120)
+
+    # The standing fields, measured before anything is placed. One pass
+    # in file order meant the last field had no room left by the time
+    # it was reached and was dropped whole - a standing that says what
+    # we believe and nothing about what happens next is half a standing,
+    # and the half that is missing is the half the loop closes on.
+    standing_lines: list[tuple[int, str, int]] = []  # (index, line, floor)
     for i, line in enumerate(lines):
         if any(line.startswith(b.split("\n")[0][:10]) for b in blocks):
             continue
@@ -685,17 +922,53 @@ def _truncate(block: str, cap: int) -> str:
             continue
         if not keep_first.match(line):
             continue
-        line = clip(line)
-        cost = len(line) + 1
-        if used + cost > cap:
+        if line.startswith(("当前判断（课题叙事）：", "下一步计划：")):
+            standing_lines.append((i, line, 120))
+        else:
+            standing_lines.append((i, clip(line), 0))
+
+    # The prose fields share the standing budget, and each keeps a floor
+    # so neither of them disappears.
+    prose = [(i, ln) for i, ln, _f in standing_lines
+             if ln.startswith(("当前判断（课题叙事）：", "下一步计划："))]
+    per = max(120, standing_budget // max(1, len(prose)))
+    clipped_standing: list[str] = []
+    for idx, ln, _floor in standing_lines:
+        if ln.startswith(("当前判断（课题叙事）：", "下一步计划：")):
+            clipped_standing.append(clip_standing(ln, per))
+        else:
+            clipped_standing.append(ln)
+    standing_cost = sum(len(x) + 1 for x in clipped_standing)
+
+    # If the standing still does not fit, cut the prose fields further,
+    # down to their floor, before dropping anything.
+    if standing_cost > standing_budget:
+        prose_idx = [k for k, ln in enumerate(standing_lines)
+                     if ln[1].startswith(("当前判断（课题叙事）：", "下一步计划："))]
+        over = standing_cost - standing_budget
+        for k in prose_idx:
+            if over <= 0:
+                break
+            cur = clipped_standing[k]
+            floor = 120
+            if len(cur) > floor:
+                cut = min(over, len(cur) - floor)
+                clipped_standing[k] = (
+                    cur[: len(cur) - cut] + "…（全文见课题文件）"
+                )
+                over -= cut
+
+    for (idx, _orig, _floor), ln in zip(standing_lines, clipped_standing):
+        cost = len(ln) + 1
+        if used + cost > cap - reserved:
             continue
-        kept.append(line)
+        kept.append(ln)
         used += cost
         # The phase thinking is the line right under "当前阶段：". Without
         # it the phase is a label with nothing under it, and the thinking
         # the phase exists to install never reaches the agent.
-        if line.startswith("当前阶段："):
-            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if ln.startswith("当前阶段："):
+            nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
             if nxt and nxt.strip() and not keep_first.match(nxt) and not keep_second.match(nxt):
                 nxt = clip(nxt)
                 cost2 = len(nxt) + 1
@@ -724,10 +997,6 @@ def _truncate(block: str, cap: int) -> str:
     # they do not fit, the line is what keeps the ledger alive. It is
     # shorter than either rule block, which is why it can be the one
     # that fits.
-    tool_cost = len(tool_line) + 1
-    rules_cost = sum(len(b) + 1 for b in blocks)
-    think_cost = len(blocks[0]) + 1
-
     if used + rules_cost <= cap:
         for b in blocks:
             kept.append(b)

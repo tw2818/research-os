@@ -196,6 +196,22 @@ A topic is one research question and the state that accumulates around it:
 `research-map.json` is not a literature summary. It is the current state of
 understanding, and it is supposed to change as evidence accumulates.
 
+**A topic can name a parent.** A cross-domain review is several
+sub-questions under one question, and the isolation between topics is
+deliberate — one topic's hypotheses must not leak into another. But a
+review spread over separate topics had no top topic and no account of
+how the evidence connects across them, so the same point got made twice
+or a gap opened between the parts.
+
+`set_state` with `parent` links a topic to the one it serves. The
+sub-topic then sees the parent's question and its siblings, and the
+parent's map shows the parts and where each one stands. The parent
+shares no ledger and no hypotheses: a hypothesis that leaks across is
+how a review ends up arguing for a position it never checked. The
+horizontal link — "these two parts touch the same evidence" — is
+something the review has to write down, because the ledger cannot see
+it.
+
 `claims.tsv` is tab-separated with a fixed header: `id`, `kind`,
 `inference_type`, `strength`, `content`, `premises`, `source`, `status`,
 `note`, `amended_from`. The last column holds the amendment history of a
@@ -388,6 +404,7 @@ research_mode(action="claim", project="X", claims=[{...}, {...}])
 research_mode(action="amend", project="X", claim_id="L44", strength="suggestive")
 research_mode(action="contradict", project="X", title="...", separator="...")
 research_mode(action="set_state", project="X", phase="weighing", narrative="...")
+research_mode(action="set_state", project="X", parent="The-Review")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")

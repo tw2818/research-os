@@ -329,6 +329,75 @@ def read_map(topic: str) -> dict[str, Any]:
     return _read_json(topic_dir(topic) / "research-map.json", {})
 
 
+def read_parent(topic: str) -> dict[str, Any]:
+    """The top topic this one serves, if it has one."""
+    parent = str(read_map(topic).get(MAP_PARENT) or "").strip()
+    if not parent:
+        return {}
+    m = read_map(parent)
+    if not m:
+        return {}
+    return {
+        "name": parent,
+        "core_question": str(m.get("core_question") or ""),
+        "goal": str(m.get("goal") or ""),
+        "narrative": str(m.get("narrative") or ""),
+    }
+
+
+def read_siblings(topic: str) -> list[dict[str, Any]]:
+    """The other sub-topics of the same parent.
+
+    This is the horizontal view a cross-domain review needs. Two
+    sub-topics that touch the same evidence have no way to know it
+    when each is isolated - and the review as a whole ends up
+    treating them as separate projects that happen to be in the same
+    folder.
+
+    What a sibling gives is its core question and where it stands.
+    Not its hypotheses and not its ledger: those stay in the sibling,
+    because a hypothesis that leaks across is how a review ends up
+    arguing for a position it never checked.
+    """
+    parent = str(read_map(topic).get(MAP_PARENT) or "").strip()
+    if not parent:
+        return []
+    out: list[dict[str, Any]] = []
+    for t in list_topics():
+        name = t["name"]
+        if name == topic:
+            continue
+        m = read_map(name)
+        if str(m.get(MAP_PARENT) or "").strip() != parent:
+            continue
+        out.append({
+            "name": name,
+            "core_question": str(m.get("core_question") or ""),
+            "phase": str(m.get("phase") or ""),
+            "narrative": str(m.get("narrative") or ""),
+        })
+    return out
+
+
+def read_children(topic: str) -> list[dict[str, Any]]:
+    """The sub-topics under this one."""
+    out: list[dict[str, Any]] = []
+    for t in list_topics():
+        name = t["name"]
+        if name == topic:
+            continue
+        m = read_map(name)
+        if str(m.get(MAP_PARENT) or "").strip() != topic:
+            continue
+        out.append({
+            "name": name,
+            "core_question": str(m.get("core_question") or ""),
+            "phase": str(m.get("phase") or ""),
+            "narrative": str(m.get("narrative") or ""),
+        })
+    return out
+
+
 # The three levels of a topic's state.
 #
 # A topic is not one question but a project with a direction, and an agent
@@ -345,6 +414,19 @@ MAP_GOAL = "goal"
 MAP_PHASE = "phase"
 MAP_TASK = "current_task"
 MAP_NARRATIVE = "narrative"
+# The topic this one serves.
+#
+# Topics are isolated on purpose: one topic's hypotheses must not leak
+# into another. A cross-domain review needs the opposite - a top topic
+# with the sub-questions under it, and an explicit account of how the
+# evidence connects across them.
+#
+# The parent does not merge anything. It does not share the ledger, and
+# a sub-topic's hypotheses stay its own. What it does is say which
+# question this work is for, and give the sub-topic its siblings - so
+# the agent can see that two sub-questions touch the same evidence
+# instead of each treating itself as the whole project.
+MAP_PARENT = "parent"
 MAP_PLAN = "plan"
 # The core question can be redefined, and the redefinitions are kept.
 # A project that runs long sometimes discovers that the question it is
@@ -391,6 +473,7 @@ def write_state(
     phase: str | None = None,
     current_task: str | None = None,
     narrative: str | None = None,
+    parent: str | None = None,
     plan: str | None = None,
     review_every: dict[str, int] | None = None,
     core_question: str | None = None,
@@ -414,6 +497,8 @@ def write_state(
         m[MAP_TASK] = str(current_task).strip()
     if narrative is not None:
         m[MAP_NARRATIVE] = str(narrative).strip()
+    if parent is not None:
+        m[MAP_PARENT] = str(parent).strip()
     if plan is not None:
         m[MAP_PLAN] = str(plan).strip()
     if review_every is not None:

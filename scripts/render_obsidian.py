@@ -413,6 +413,7 @@ def _render_map(topic: str, data: dict, *, obsidian: bool) -> str:
     contra = data.get("contradictions") or {}
     review = data.get("review") or {}
     library = data.get("library") or []
+    tree = data.get("tree") or {}
 
     title = _title(topic, m)
     core = str(m.get("core_question") or "").strip()
@@ -435,6 +436,15 @@ def _render_map(topic: str, data: dict, *, obsidian: bool) -> str:
     if updated:
         meta.append(f"状态截至 {updated}")
     lines += [" · ".join(meta), ""]
+
+    parent = tree.get("parent") or {}
+    if parent:
+        lines += [
+            f"这是「{parent.get('name')}」总课题下的一个子课题。",
+            "",
+            f"总课题要回答的是：{parent.get('core_question') or '（未写明）'}",
+            "",
+        ]
 
     # ------------------------------------------------- 1. what we study
     lines += ["## 我们在研究什么", ""]
@@ -474,6 +484,31 @@ def _render_map(topic: str, data: dict, *, obsidian: bool) -> str:
 
     # --------------------------------------------------- 2. where we are
     lines += ["## 现在站在哪", ""]
+    children = tree.get("children") or []
+    if children:
+        lines += ["### 这个总课题分成几块", ""]
+        for c in children:
+            cq = str(c.get("core_question") or "").strip()
+            cph = _phase_label(str(c.get("phase") or "").strip())
+            cn = str(c.get("narrative") or "").strip()
+            bits = []
+            if cph:
+                bits.append(f"处在「{cph}」阶段")
+            if cq:
+                bits.append(f"问的是{cq}")
+            if cn:
+                bits.append(cn[:180])
+            head = f"- **{c.get('name')}**"
+            if obsidian:
+                head += f" — [[{c.get('name')}]]"
+            lines.append(head)
+            lines.append("  " + ("；".join(bits) if bits else "还没写下核心问题") + "。")
+        lines += [
+            "",
+            "各块各记各的账本，假设不互相继承。横向的证据联系要在这里显式写出来——"
+            "两处证据指向同一件事时，账本里看不到，只有在这里能看见。",
+            "",
+        ]
     standing: list[str] = []
     plabel = _phase_label(phase)
     if plabel:
@@ -772,6 +807,15 @@ def render_topic(
     contra = state.read_contradictions(topic)
     review = _safe(lambda: state.read_review(topic), {})
     library = _safe(lambda: state.read_library(topic), [])
+    # Where this topic sits in the tree. A top topic's map has to show
+    # the parts, and a sub-topic's map has to say which question it
+    # serves - otherwise a review spread over several topics is not
+    # visible from any one of them.
+    tree = _safe(lambda: {
+        "parent": state.read_parent(topic),
+        "children": state.read_children(topic),
+        "siblings": state.read_siblings(topic),
+    }, {})
     written: list[Path] = []
     title = _title(topic, m)
     by_kind = _by_kind(claims)
@@ -788,6 +832,7 @@ def render_topic(
                 "contradictions": contra,
                 "review": review,
                 "library": library,
+                "tree": tree,
             },
             obsidian=obsidian,
         ),

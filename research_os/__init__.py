@@ -367,7 +367,18 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "description": (
                     "For action 'set_state': what we currently believe, and why it "
                     "changed. This is the topic's story - update it when the "
-                    "evidence moves the picture, not only when the ledger grows."
+                    "evidence moves the picture, not only when the ledger grows.\n"
+                    "A story, not a summary. A ledger can be complete and the story "
+                    "still have no explanatory power, so a narrative that only "
+                    "restates what is in the ledger is not written yet. It has to "
+                    "answer, in prose: what the key phenomenon is; why the "
+                    "explanations on offer fall short; where the real contradiction "
+                    "is; which explanations are still competing; what evidence would "
+                    "tell them apart; and what can be concluded now. Which of these "
+                    "the question even has is its own judgement - a question with "
+                    "one answer does not need competing explanations, and one with "
+                    "no established field does not need a literature to fall short "
+                    "of. Say the ones that apply and say why the others do not."
                 ),
             },
             "plan": {
@@ -376,6 +387,16 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "For action 'set_state': what happens next, in one line. Setting "
                     "it lifts a pause: a review that stopped the work is answered "
                     "by saying where the work is going."
+                ),
+            },
+            "parent": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': the top topic this one serves. A "
+                    "cross-domain review is several sub-questions under one "
+                    "question; naming the parent lets the sub-topic see the "
+                    "question it is for and its siblings, without sharing their "
+                    "hypotheses or their ledger. Empty string removes the link."
                 ),
             },
             "verdict": {
@@ -427,7 +448,10 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["observation", "report", "inference", "hypothesis"],
+                        },
                         "content": {"type": "string"},
                         "source": {"type": "string"},
                         "premises": {"type": "array", "items": {"type": "string"}},
@@ -445,6 +469,20 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "kind": {
                         "type": "string",
                         "enum": ["observation", "report", "inference", "hypothesis"],
+                        "description": (
+                            "observation (a fact - needs a source, read in the "
+                            "original) | report (someone else's conclusion - needs a "
+                            "source) | inference (your own reasoning - needs premises "
+                            "that are in the ledger, and may not be stated more "
+                            "strongly than its weakest premise) | hypothesis (an "
+                            "untested idea - needs no source).\n"
+                            "A hypothesis is not a lesser claim. It is what "
+                            "exploration is for: a bold, clearly marked hypothesis "
+                            "that turns out to be wrong is progress, and a hedge "
+                            "that was never stated is not. Propose the one you "
+                            "believe, say what would show it wrong, and leave it "
+                            "marked as a hypothesis until the evidence moves it."
+                        ),
                     },
                     "content": {"type": "string"},
                     "inference_type": {
@@ -932,6 +970,17 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             goal = args.get("goal")
             phase = args.get("phase")
             task = args.get("current_task")
+            parent = args.get("parent")
+            if parent is not None:
+                parent = str(parent).strip()
+                if parent and not _state.topic_exists(parent):
+                    return fail(
+                        f"parent topic not found: {parent}. Create it first, or "
+                        f"check the name - research_mode(action='list') shows "
+                        f"the topics that exist."
+                    )
+                if parent == project:
+                    return fail("a topic cannot be its own parent")
             narrative = args.get("narrative")
             plan = args.get("plan")
             every = args.get("review_every")
@@ -943,7 +992,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             if all(
                 x is None
                 for x in (
-                    goal, phase, task, narrative, plan, every,
+                    goal, phase, task, narrative, plan, every, parent,
                     core_q, exploration,
                 )
             ):
@@ -952,7 +1001,8 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "to get at), phase (scoping/evidence/weighing/closing/"
                     "writing), current_task (what is being done right now), "
                     "narrative (what we currently believe and why it changed), "
-                    "plan (what happens next), review_every "
+                    "plan (what happens next), parent (the top topic this one "
+                    "serves), review_every "
                     "({'searches': n, 'turns': n} - how much work may pile "
                     "up before a global review), core_question (redefine the "
                     "question - with question_reason saying why), exploration "
@@ -973,6 +1023,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 current_task=task,
                 narrative=narrative,
                 plan=plan,
+                parent=parent,
                 review_every=every,
                 core_question=core_q,
                 question_reason=q_reason,
@@ -1372,14 +1423,30 @@ def _review_due(topic: str) -> str | None:
         m = _state.read_map(topic)
         narrative = str(m.get("narrative") or "").strip()
         core = str(m.get("core_question") or "").strip()
+        # The counters said now. They cannot say whether the question is
+        # answered: eight searches may be enough for one question and may
+        # not have touched a competing mechanism for another. So the
+        # counters decide when to ask, and the questions below decide
+        # what the answer is.
+        #
+        # The fourth one is the one that has teeth. "Is more searching
+        # worth it" is answerable with a shrug. "What judgement do you
+        # expect more searching to change" is not: if nothing would
+        # change, the searching is not worth it, and the agent has to
+        # say so.
         return (
             f"先停一下，做一次全局审查再继续检索。\n"
             f"这个课题已经检索 {searches} 次、进行了 {turns} 轮工作。"
-            f"要判断三件事：\n"
+            f"计数只说明该看了，判断要你自己下。要回答：\n"
             f"（a）这些材料有没有改变原来的判断"
             f"（现在记着的判断是：{narrative[:80] if narrative else '还没记下判断'}）？\n"
-            f"（b）现在的方向还服务核心问题（{core[:60]}）吗？\n"
-            f"（c）继续检索还值得吗，还是该收手？\n"
+            f"（b）当前还在 competing 的解释，材料有没有真的把它们分开？"
+            f"还是只是又找到一批支持其中一条的东西？\n"
+            f"（c）现有结论够不够支撑下一步动作"
+            f"（{core[:60] if core else '核心问题'}）——"
+            f"不够的话缺的是什么，够的话下一步是什么？\n"
+            f"（d）如果继续检索，你预期它能改变哪一个具体判断？"
+            f"说不出是哪一个，就说明继续检索改不了任何判断，该收手了。\n"
             f"用 research_mode(action='review', project='{topic}', "
             f"verdict='continue|redirect|pause', review_note='<理由>') 记下结论，"
             f"判 redirect/pause 就同时用 action='set_state' 更新叙事和计划。"
@@ -2100,7 +2167,17 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         # a report of what was said and not said, in place of a position.
         # The ledger still holds the claims; the answer has to carry a
         # judgment.
-        if not _audit.has_position(response):
+        #
+        # Except in the open phases. A diverging phase that has to state
+        # a position produces a position nobody checked: the agent says
+        # what it thinks before it has looked, and then the narrowing
+        # phase has nothing left to narrow. So the requirement follows
+        # the phase - loose while the frame is open, firm once the work
+        # is committing to something.
+        strictness = _protocol.phase_strictness(
+            str(_state.read_map(topic).get("phase") or "")
+        )
+        if strictness != "open" and not _audit.has_position(response):
             return (
                 f"{response}\n\n"
                 f"---\n"

@@ -5,6 +5,55 @@ All notable changes to Research OS are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+- **The discipline was enforced at every moment of a project whose
+  moments are not the same.** A model that must always have a position
+  answers an open question with a position - so the exploration stage
+  produced conclusions nobody checked, and the narrowing stage had
+  nothing left to narrow. The phases now carry a strictness: `scoping`
+  and `diverging` are open (a position is not required, a bold marked
+  hypothesis is encouraged), `evidence` and `weighing` are mixed, and
+  `closing` and `writing` are tight (a position is required and the
+  ledger's problems are reported). The evidence discipline itself is the
+  floor and never moves: a claim with no source is not a claim in any
+  phase. What changed is when the agent is pushed, and when it is shown
+  the ledger's problems - the checks run all along, but showing them
+  during exploration only teaches the agent to weaken what it has just
+  proposed.
+- **The open phases forbade the two things an open phase is for.**
+  `evidence` said "no conclusions, and do not change the question", and
+  a question the evidence has disproven does not become a settled
+  question - it becomes a wrong one. `diverging` said "no conclusions",
+  which also took away the right to land on something. Both gates now
+  say what the phase is for rather than what it must not do.
+- **A narrative was a paragraph, and a paragraph was cut into pieces.**
+  The block is assembled line by line, so the three paragraphs of a
+  long narrative became three lines: the first matched the standing
+  pattern and was clipped, the other two matched nothing and were
+  dropped. The agent saw a conclusion and the start of a reason, with
+  the rest silently gone. The narrative and the plan are now rejoined
+  and clipped as prose.
+- **A long standing took the whole injection budget, and the thinking
+  rules were cut out of the block.** The block then said what the
+  project was and nothing about how to work on it. The rules are
+  reserved first now and the standing is cut to fit, because the
+  standing is in the topic file and the rules are nowhere else. A cut
+  standing says so, so the agent knows the narrative it has is short.
+- **A cross-domain review had no way to be a review.** Topics are
+  isolated on purpose - one topic's hypotheses must not leak into
+  another - but a review spread over several sub-questions had no top
+  topic and no account of how the evidence connects across them. A
+  topic can now name a parent: it sees the question it serves and its
+  siblings, and the parent's map shows the parts and where each one
+  stands. The parent shares no ledger and no hypotheses; a hypothesis
+  that leaks across is how a review ends up arguing for a position it
+  never checked.
+- **The review asked whether to keep going, and that is answerable with
+  a shrug.** It now asks four questions, and the fourth has teeth: if
+  continuing the search cannot be said to change any particular
+  judgement, then continuing it is not worth it and the work should
+  stop. The counters still decide when to ask - they are a checkpoint,
+  not a judge.
+
 ## [Unreleased]
 
 ## [0.3.0] — 2026-10-25

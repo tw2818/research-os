@@ -51,7 +51,16 @@ except ImportError:
 OVERCLAIM_PATTERNS = (
     (re.compile(r"(?<!未)(已|均|皆)证实"), "已证实"),
     (re.compile(r"(?<!尚未)(确凿|明确)证明"), "确凿证明"),
-    (re.compile(r"证明[了过]?[" + r"\u4e00-\u9fff" + r"]*解耦"), "证明…解耦"),
+    # "Proves X is separate from Y" - the claim that a distinction was
+    # established when the evidence only left it open. The verb varies
+    # by field, so the pattern is the verb plus a separation word.
+    (
+        re.compile(
+            r"(证明|证实|确证)[了过]?[^。；;]{0,12}"
+            r"(解耦|分离|独立|无关|因果上无关)"
+        ),
+        "证明了…的分离",
+    ),
     (re.compile(r"充分(说明|表明)"), "充分说明"),
     (re.compile(r"无可争议"), "无可争议"),
     (re.compile(r"彻底解决"), "彻底解决"),

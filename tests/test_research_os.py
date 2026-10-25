@@ -733,11 +733,11 @@ def test_question_records_an_open_question():
     )
     import json
     out = json.loads(m._tool_handler(
-        {"action": "question", "project": "QTopic", "question": "缓解的定义怎么统一"},
+        {"action": "question", "project": "QTopic", "question": "口径的定义怎么统一"},
         session_id=sid,
     ))
     assert "open_question" in out
-    assert state.read_map("QTopic")["open_questions"] == ["缓解的定义怎么统一"]
+    assert state.read_map("QTopic")["open_questions"] == ["口径的定义怎么统一"]
 
 
 def test_map_gap_is_reported_when_there_is_no_separator():
@@ -1594,7 +1594,7 @@ def test_a_hedged_sentence_is_not_taken_for_a_position():
     declines to stand behind it. That is the shape the check exists to
     catch, not to accept."""
     assert audit.has_position("综合来看，这更支持残余缺损确实存在。") is True
-    assert audit.has_position("这可能说明炎症水平在缓解期仍然偏高，需要更多研究。") is False
+    assert audit.has_position("这可能说明该指标在当前阶段仍然偏高，需要更多研究。") is False
     assert audit.has_position("Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。") is False
 
 
@@ -2129,7 +2129,60 @@ def test_the_block_keeps_the_standing_when_the_question_is_long():
     assert "当前阶段" in block
     assert "这轮不要做" in block
     assert "research_mode(action='claim'" in block
-    assert "给竞争解释" in block
+    assert "给可能答案" in block
+
+
+def test_the_moves_work_outside_the_lab_bench():
+
+    """The moves came from one research genre, and their wording has to
+    survive the move to another one.
+
+    A question that is settled by an experiment gets its rival readings
+    told apart by an observation. A question that is settled by a proof,
+    a reading of a text, or a design constraint does not: there is no
+    observation to make, and asking for one is asking the wrong thing.
+
+    The wording that says "what observation would separate them" pushes
+    every question into the shape of an experiment. The wording that
+    says "what material, test or line of reasoning" does not, and it
+    still asks the model to say how the two readings could be told
+    apart - which is the part that does the work.
+    """
+    block = protocol.THINKING_RULES
+    assert "给可能答案" in block, "the rival-reading move should not assume there are rivals"
+    assert "观察" not in block, "an observation is one way to tell readings apart, not the only one"
+    assert "材料" in block or "判据" in block
+
+    # The same for the phase that asks for a counterexample.
+    for phase in ("scoping", "diverging", "evidence", "weighing", "closing", "writing"):
+        text = str(protocol.PHASES.get(phase, {}).get("thinking") or "")
+        assert "观察" not in text, "%s asks for an observation" % phase
+        assert "观察" not in str(protocol.PHASES.get(phase, {}).get("output") or ""), phase
+
+    # And the turn demand.
+    assert "区分两个解释的观察" not in protocol.TURN_DEMAND
+
+
+def test_no_rule_carries_one_researcher_topic():
+    """The rules are read on every research turn, so anything specific to
+    one researcher's questions is read on every research turn too.
+
+    A worked example makes the move concrete, and a concrete example
+    comes from somewhere. The example that was in the rules named a
+    syndrome, a deficit and a circuit, and every topic in every field
+    was being handed that picture.
+    """
+    injected = protocol.THINKING_RULES + protocol.TURN_DEMAND + protocol.SCOPE_RULE
+    for phase in protocol.PHASES.values():
+        injected += str(phase.get("thinking") or "") + str(phase.get("output") or "")
+        injected += str(phase.get("gate") or "")
+    banned = [
+        "缓解", "抑郁", "肠易激", "应激性", "溃疡", "工作记忆", "执行功能",
+        "认知功能", "小鼠", "大鼠", "海马", "mPFC", "中枢", "炎症", "菌群",
+        "环路", "神经元", "remission", "depression", "cognition", "IBS",
+    ]
+    for word in banned:
+        assert word not in injected, "%s is in the injected text" % word
 
 
 def test_the_situation_gives_up_room_before_the_standing():
@@ -2195,7 +2248,7 @@ def test_inference_with_conclusion_wording_is_not_bundled():
     state.set_claim_status("T-bundle3", "L1", "verified")
     state.append_claim("T-bundle3", {
         "kind": "inference",
-        "content": "the finding therefore suggests that cognition and mood dissociate",
+        "content": "the finding therefore suggests that the two measures dissociate",
         "inference_type": "explanatory", "premises": "L1",
     })
     r = validate_claims("T-bundle3")

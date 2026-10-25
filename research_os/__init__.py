@@ -706,7 +706,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             # the injected protocol is capped and cannot carry this.
             missing = _map_gaps(project)
             available = (
-                "可用动作：claim（记证据）、contradict（记竞争解释和区分它们的证据）、"
+                "可用动作：claim（记证据）、contradict（记可能答案和区分它们的判据）、"
                 "question（记未解决的问题）、map（更新研究地图）、validate（检查账本）。"
             )
             return ok({
@@ -1321,9 +1321,9 @@ def _map_gaps(topic: str) -> list[str]:
             )
         if len(hyp) >= 2 and not items:
             wants.append(
-                f"有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们。"
+                f"有 {len(hyp)} 个可能答案，但没记下什么能区分它们。"
                 f"这不是记账问题——是这几个解释现在没法互相淘汰，"
-                f"所以没有下一步可做。说出哪一个观察能分开它们。"
+                f"所以没有下一步可做。说出哪一个判据能分开它们。"
             )
         if has_judgment and not open_q:
             wants.append(
@@ -1597,7 +1597,7 @@ def _state_write_guard(**kwargs: Any) -> dict[str, Any] | None:
                 "{'kind':'report','content':'...','source':'PMID ...'}])"
                 "——一次检索出来几条就一次记完，不用一条一个调用。\n"
                 "记竞争解释：research_mode(action='contradict', project='<课题>', "
-                "title='<哪个解释>', separator='<什么证据能区分>')"
+                "title='<哪个可能答案>', separator='<什么能区分它们>')"
             ),
         }
     except Exception:

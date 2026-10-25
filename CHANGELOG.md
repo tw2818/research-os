@@ -55,6 +55,18 @@ record of the work was missing.
 
 ### Fixed
 
+- **The rules carried one researcher's questions into every field.** The
+  moves came from a bench experiment, and so did their wording: "what
+  observation would separate these two explanations", "at least two
+  rival explanations". A question settled by a proof, a reading of a
+  text or a design constraint has no observation to make, and asking
+  for one asks the wrong thing — so the question was being answered in
+  the wrong shape. The moves now read "what material, test or line of
+  reasoning", and they say outright that a question which should not be
+  settled by separation needs a different test: what would show it
+  right, what would show it wrong. The worked example in the rules
+  named a syndrome, a deficit and a circuit; it is gone, and a test
+  now checks the injected text for any field-specific content.
 - **The open questions could be crowded out of the block.** The settled
   questions were given the standing's priority and the open ones were
   left below the rules, so a project with a long narrative and a full

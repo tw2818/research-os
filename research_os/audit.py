@@ -162,3 +162,40 @@ def unaccounted_sentences(text: str, known: str) -> list[str]:
             continue
         out.append(sentence)
     return out
+
+# Markers of a position: the answer says what it thinks, not only what it
+# found. A research answer without one of these is a list of findings, and a
+# list of findings is what the reader cannot use.
+_POSITION_MARKERS = (
+    "我认为", "我觉得", "我倾向", "目前看", "现阶段", "结论是", "综合来看",
+    "最可能", "更可能", "更支持", "不支持", "可以认为", "提示", "说明",
+    "因此", "所以", "这意味着", "据此", "初步判断", "倾向于认为",
+    "the evidence suggests", "these findings suggest", "taken together",
+    "overall", "our best", "points to", "argues for",
+)
+
+# Markers of a hedge with no position behind it: the sentence gives the
+# reader nothing to hold.
+_HEDGE_ONLY = (
+    "有待进一步研究", "需要更多研究", "尚需进一步", "未来需要",
+    "仍需进一步验证", "有待验证", "尚不清楚", "有待进一步确认",
+)
+
+
+def has_position(text: str) -> bool:
+    """True when the text states what it thinks, not only what it found.
+
+    This is the check that matters for the shape of an answer. A model that
+    gathers evidence reliably and never says what it makes of it produces a
+    report: every point hedged, every caveat listed, no position anywhere.
+    The reader is left to do the synthesis, which is the part that needed
+    doing.
+    """
+    if not text or not text.strip():
+        return False
+    low = text.lower()
+    if any(m in low for m in _POSITION_MARKERS):
+        return True
+    # A bare list of findings with hedges is not a position.
+    hedges = sum(1 for m in _HEDGE_ONLY if m in text)
+    return hedges > 0 and False

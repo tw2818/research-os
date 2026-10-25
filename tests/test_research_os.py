@@ -348,22 +348,38 @@ def test_scan_turn_notices_ledger_use():
     assert s["ledger_calls"] == 1
 
 
-def test_accounting_note_fires_when_evidence_unaccounted():
+def test_the_turn_is_given_a_direction_not_a_nag():
+    """A turn that searched without recording is not helped by being told
+    it did not record. It is helped by being told what the phase is for.
+    The nag pushed the agent into completing a form, which is the failure
+    this project is against."""
     m = _handler()
-    note = m._accounting_note("T-acc", {"evidence": 2, "ledger": 0})
-    assert "账本" in note
-    assert "research_mode" in note
-    assert "claim" in note
-
-
-def test_accounting_note_silent_when_ledger_used():
-    m = _handler()
-    assert m._accounting_note("T-acc", {"evidence": 2, "ledger": 1}) == ""
-
-
-def test_accounting_note_silent_without_evidence():
-    m = _handler()
-    assert m._accounting_note("T-acc", {"evidence": 0, "ledger": 0}) == ""
+    sid = "t-dir"
+    m._tool_handler(
+        {"action": "create", "project": "DirTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "DirTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "DirTopic",
+            "phase": "weighing",
+            "current_task": "比较两个解释的证据强度",
+        },
+        session_id=sid,
+    )
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    m._post_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
+    )
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
+    assert out is not None
+    ctx = out["context"]
+    assert "比较两个解释的证据强度" in ctx
+    assert "哪个解释现在更划算" in ctx
+    # And the nag is gone.
+    assert "账本还是空的" not in ctx
 
 
 def test_post_tool_call_records_evidence_and_ledger():
@@ -427,7 +443,10 @@ def test_gap_is_reported_when_only_the_topic_was_opened():
     )
     out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
     assert out is not None
-    assert "账本还是空的" in out["context"], out["context"][-300:]
+    # The block still reaches the turn and still names the tool call - the
+    # ledger has to be written somewhere. What is gone is the nag.
+    assert "research_mode" in out["context"]
+    assert "账本还是空的" not in out["context"]
 
 
 def test_turn_activity_is_isolated_per_turn():
@@ -456,10 +475,11 @@ def test_next_turn_reports_the_previous_gap():
     m._post_tool_call(
         tool_name="mcp__pubmed__pubmed_search_articles", session_id=sid, turn_id="t1"
     )
-    # Turn 2: the agent should be told the ledger is still empty.
+    # Turn 2: the block still carries the method and the tool call.
     out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t2")
     assert out is not None
-    assert "账本还是空的" in out["context"], out["context"][-400:]
+    assert "research_mode" in out["context"]
+    assert "账本还是空的" not in out["context"]
 
 
 # --------------------------------------------------------------------------
@@ -749,9 +769,31 @@ def test_map_gap_is_quiet_once_filled():
          "title": "H1", "separator": "a measurement that separates them"},
         session_id=sid,
     )
+    m._tool_handler(
+        {"action": "set_state", "project": "GapMapTopic2",
+         "goal": "find out which one", "current_task": "compare H1 and H2",
+         "phase": "weighing"},
+        session_id=sid,
+    )
     out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t1")
     assert out is not None
     assert "研究地图的缺口" not in out["context"], out["context"][-300:]
+
+
+def test_a_topic_with_no_standing_is_asked_for_one():
+    """A topic with no goal and no current task has no direction. The agent
+    is asked where it is going - the question is what makes it think."""
+    m = _handler()
+    sid = "t-standing-gap"
+    m._tool_handler(
+        {"action": "create", "project": "StandingGap", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "StandingGap"}, session_id=sid)
+    out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="t1")
+    assert out is not None
+    assert "没有方向" in out["context"]
+    assert "current_task" in out["context"]
 
 
 # --------------------------------------------------------------------------
@@ -894,7 +936,14 @@ def test_a_heredoc_writing_into_the_state_tree_is_blocked():
     assert out is not None, out
 
 
-def test_transform_llm_output_flags_unaccounted_assertions():
+def test_transform_llm_output_asks_for_a_position_when_there_is_none():
+    """The check is the shape of the answer, not the bookkeeping.
+
+    It used to list every sentence that was not in the ledger, which
+    produced a report of what was said and not said, in place of a
+    position. A list of findings with no position is what the reader cannot
+    use, so that is what gets flagged now.
+    """
     m = _handler()
     sid = "t-transform"
     m._tool_handler(
@@ -915,11 +964,12 @@ def test_transform_llm_output_flags_unaccounted_assertions():
         ),
     )
     assert out is not None
-    assert "Smith 2019" in out
-    assert "Wang 2016" not in out.split("没有记进账本")[-1], out
+    assert "没给判断" in out
+    # The answer is not rewritten and the findings are not listed back.
+    assert "Smith 2019" not in out.split("---")[-1]
 
 
-def test_transform_llm_output_quiet_when_everything_is_accounted():
+def test_transform_llm_output_quiet_when_there_is_a_position():
     m = _handler()
     sid = "t-transform2"
     m._tool_handler(
@@ -934,14 +984,16 @@ def test_transform_llm_output_quiet_when_everything_is_accounted():
     })
     out = m._transform_llm_output(
         session_id=sid,
-        response_text="Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。",
+        response_text=(
+            "Wang 2016 报告睡眠剥夺后陈述性记忆评分下降。"
+            "综合来看，这更支持残余缺损确实存在，而不是完全由当前症状解释。"
+        ),
     )
     assert out is None, out
 
 
-def test_transform_llm_output_flags_everything_when_the_ledger_is_empty():
-    """An empty ledger means every assertion is unaccounted for — that is the
-    case worth flagging, not the case worth ignoring."""
+def test_transform_llm_output_asks_for_a_position_with_an_empty_ledger():
+    """An empty ledger is not what gets flagged. A missing position is."""
     m = _handler()
     sid = "t-empty-ledger"
     m._tool_handler(
@@ -954,8 +1006,8 @@ def test_transform_llm_output_flags_everything_when_the_ledger_is_empty():
         response_text="Wang 2016 的 meta 分析表明睡眠剥夺后陈述性记忆评分下降。",
     )
     assert out is not None
-    assert "账本还是空的" in out, out[-300:]
-    assert "Wang 2016" in out
+    assert "没给判断" in out, out[-300:]
+    assert "账本还是空的" not in out
 
 
 def test_transform_llm_output_quiet_outside_research_mode():
@@ -999,7 +1051,9 @@ def test_audit_injection_reaches_the_turn():
     )
     out = m._pre_llm_call(session_id=sid, user_message="继续", turn_id="turn-2")
     assert out is not None
-    assert "账本还是空的" in out["context"], out["context"][-300:]
+    # The method reaches the turn; the nag does not.
+    assert "research_mode" in out["context"]
+    assert "账本还是空的" not in out["context"]
 
 
 # --------------------------------------------------------------------------
@@ -1152,6 +1206,137 @@ def test_research_block_is_more_thinking_than_formatting():
     thinking = len(protocol.THINKING_RULES) + len(protocol.TURN_DEMAND)
     formatting = len(protocol.CLAIM_RULES) + len(protocol.SCOPE_RULE)
     assert thinking > formatting * 1.4, (thinking, formatting)
+
+
+def test_the_block_carries_the_project_standing():
+    """Goal, phase and current task. Without all three the agent answers the
+    question in front of it and forgets the one behind it."""
+    _fresh_topic("T-standing", "Q?")
+    m = state.read_map("T-standing")
+    m["goal"] = "搞清楚这个领域到底有没有共识"
+    m["phase"] = "weighing"
+    m["current_task"] = "比较 2020 年后的两个 meta 分析为何效应量不同"
+    state.write_map("T-standing", m)
+    block = protocol.build_research_block("T-standing", {"max_inject_chars": 2000})
+    assert "搞清楚这个领域到底有没有共识" in block
+    assert "当前阶段" in block
+    assert "比较 2020 年后的两个 meta 分析" in block
+
+
+def test_each_phase_calls_for_a_different_way_of_thinking():
+    """The phase is not a label. Scoping frames the question, evidence
+    gathers against an expectation, weighing pits explanations against each
+    other. An agent that used one method for all four would gather evidence
+    while it should be deciding what to ask."""
+    _fresh_topic("T-phase", "Q?")
+    seen = set()
+    for phase in ("scoping", "evidence", "weighing", "closing", "writing"):
+        m = state.read_map("T-phase")
+        m["phase"] = phase
+        state.write_map("T-phase", m)
+        block = protocol.build_research_block("T-phase", {"max_inject_chars": 2000})
+        assert protocol.PHASES[phase]["thinking"] in block, phase
+        seen.add(protocol.PHASES[phase]["thinking"])
+    assert len(seen) == 5
+
+
+def test_the_block_asks_whether_the_task_still_serves_the_core_question():
+    """Drift is the failure no per-claim check catches. Every claim can be
+    sourced and the project can still have become a different project."""
+    _fresh_topic("T-drift", "核心科学问题是什么？")
+    m = state.read_map("T-drift")
+    m["core_question"] = "核心科学问题是什么？"
+    m["goal"] = "更大的目标"
+    m["current_task"] = "查一篇 2005 年的文章"
+    state.write_map("T-drift", m)
+    block = protocol.build_research_block("T-drift", {"max_inject_chars": 2000})
+    assert "对齐检查" in block
+    assert "核心科学问题是什么？" in block
+    assert "查一篇 2005 年的文章" in block
+
+
+def test_the_phase_decides_the_shape_of_the_answer():
+    """The phase has to change the output, not only the way of thinking.
+    A model that gathers evidence while it should be weighing explanations
+    produces a list of findings with no position in it, and a list of
+    findings is what the reader cannot use."""
+    _fresh_topic("T-shape", "Q?")
+    m = state.read_map("T-shape")
+    m["phase"] = "weighing"
+    state.write_map("T-shape", m)
+    block = protocol.build_research_block("T-shape", {"max_inject_chars": 2000})
+    assert "哪个解释现在更划算" in block
+    m["phase"] = "closing"
+    state.write_map("T-shape", m)
+    block = protocol.build_research_block("T-shape", {"max_inject_chars": 2000})
+    assert "给出结论、它的强度" in block
+
+
+def test_the_thinking_rules_include_trade_off():
+    """The move that keeps a session from drowning in detail. Without it the
+    agent covers everything and the reader gets a report."""
+    assert "取舍" in protocol.THINKING_RULES
+    assert "不要写成条目清单" in protocol.THINKING_RULES
+
+
+def test_the_agent_can_set_the_standing_and_the_phase():
+    m = _handler()
+    m._tool_handler(
+        {
+            "action": "create",
+            "project": "T-stand",
+            "core_question": "Q?",
+        },
+        session_id="t-stand",
+    )
+    out = m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "T-stand",
+            "goal": "把边界划清",
+            "phase": "scoping",
+            "current_task": "列出可能的问题问法",
+        },
+        session_id="t-stand",
+    )
+    assert "scoping" in str(out), out
+    assert state.read_goal("T-stand") == "把边界划清"
+    assert state.read_phase("T-stand") == "scoping"
+    assert state.read_current_task("T-stand") == "列出可能的问题问法"
+
+
+def test_an_unknown_phase_is_refused():
+    m = _handler()
+    m._tool_handler(
+        {"action": "create", "project": "T-badphase", "core_question": "Q?"},
+        session_id="t-badphase",
+    )
+    out = m._tool_handler(
+        {"action": "set_state", "project": "T-badphase", "phase": "nonsense"},
+        session_id="t-badphase",
+    )
+    assert "nonsense" in str(out), out
+
+
+def test_a_global_review_is_recorded():
+    m = _handler()
+    m._tool_handler(
+        {"action": "create", "project": "T-rev", "core_question": "Q?"},
+        session_id="t-rev",
+    )
+    out = m._tool_handler(
+        {
+            "action": "review",
+            "project": "T-rev",
+            "verdict": "drifting",
+            "review_note": "在查干预研究，核心问题其实是病因",
+        },
+        session_id="t-rev",
+    )
+    assert "drifting" in str(out), out
+    reviews = state.read_map("T-rev").get("reviews") or []
+    assert len(reviews) == 1
+    assert "病因" in reviews[0]["note"]
 
 
 def test_research_block_carries_the_situation_not_just_the_hypothesis_list():

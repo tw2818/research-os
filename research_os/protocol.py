@@ -27,6 +27,96 @@ except ImportError:
     except ImportError:  # loaded flat inside the Hermes plugin directory
         from state import read_claims, read_contradictions, read_map  # type: ignore[no-redef]
 
+# The phases of a research project, and what thinking each one calls for.
+#
+# A project moves through these, and the way of thinking changes with them.
+# Scoping a question, gathering evidence, weighing rival explanations, and
+# writing up are different jobs, and an agent that uses the same method for
+# all four will gather evidence while it should be deciding what to ask, or
+# write while it should be arguing with itself.
+#
+# The phase is the agent's own: it moves the phase when the work moves, and
+# the switch is a tool call, not a guess made by the hook.
+PHASES: dict[str, dict[str, str]] = {
+    "scoping": {
+        "name": "界定问题",
+        "thinking": (
+            "这轮在界定问题，别急着找证据。要回答的科学问题是什么？"
+            "为什么这个答案会有用？有哪些可能的问题问法？选哪个，代价是什么？"
+            "什么答案会让你改变问法？"
+        ),
+        "output": (
+            "给出你选定的问法，以及放弃其他问法的代价。"
+        ),
+    },
+    "evidence": {
+        "name": "搜集证据",
+        "thinking": (
+            "这轮在搜集证据。带着具体问题去找，别漫无目的地捞文献："
+            "要找的证据能支持或否定哪个说法？找之前先说清你要看到什么。"
+            "不同来源的结论冲突时，先想清楚它们测的是不是同一件事。"
+        ),
+        "output": (
+            "给出这批证据支持什么、不支持什么，一句话结论。"
+        ),
+    },
+    "weighing": {
+        "name": "权衡解释",
+        "thinking": (
+            "这轮在权衡解释。看哪个预测被证实、哪个被削掉。"
+            "注意：证据不支持某个解释，和证据支持另一个解释，是两回事——"
+            "后者需要正面证据。如果两个解释都能解释同一批数据，那说明还缺一个观察。"
+        ),
+        "output": (
+            "给出哪个解释现在更划算、哪个被削掉了、依据是什么。"
+        ),
+    },
+    "closing": {
+        "name": "收束结论",
+        "thinking": (
+            "这轮在收束。结论能说到多强？逐条检查依据够不够。"
+            "哪里是推测，哪里是事实，哪里连方向都不确定——分开写。"
+            "什么新证据会推翻这个结论？如果没有，那这个结论就不牢靠。"
+        ),
+        "output": (
+            "给出结论、它的强度、以及在什么条件下不成立。"
+        ),
+    },
+    "writing": {
+        "name": "成文表达",
+        "thinking": (
+            "这轮在写。先说清楚给谁看、他们已经知道什么、看完要知道什么。"
+            "少用'研究表明'，直接说是谁、什么设计、什么效应量、什么限制。"
+        ),
+        "output": (
+            "给出成稿的段落式结论，读者读完能带走一个立场。"
+        ),
+    },
+}
+
+DEFAULT_PHASE = "weighing"
+
+
+def phase_thinking(phase: str) -> str:
+    """The thinking instruction for a phase, with its name."""
+    entry = PHASES.get(str(phase or "").strip())
+    if not entry:
+        entry = PHASES[DEFAULT_PHASE]
+    return f"当前阶段：{entry['name']}\n{entry['thinking']}"
+
+
+def phase_output(phase: str) -> str:
+    """The shape the answer should take in this phase.
+
+    The phase has to change the shape of the output, not only the way of
+    thinking about it. A model that gathers evidence in the weighing phase
+    will produce a list of findings with no position in it, and a list of
+    findings is what the reader cannot use.
+    """
+    entry = PHASES.get(str(phase or "").strip()) or PHASES[DEFAULT_PHASE]
+    return str(entry.get("output") or "")
+
+
 # The four claim types, stated as the agent's own working vocabulary.
 # The claim discipline. Not injected any more: the full format is in the
 # tool's own description, and an agent that is about to write a claim reads
@@ -64,9 +154,13 @@ THINKING_RULES = """回答前按科研的路子走：
 2. 给竞争解释：至少两种，包括跟你直觉相反的那种。写清各自预测什么。
 3. 找抓手：什么观察能把它们分开？分不开就直说分不开，别糊过去。
 4. 找陷阱：哪个推论看着成立其实不成立？（如"缓解后仍有缺损 ⇒ 环路已损伤"——残留状态也解释得通）
-5. 标边界：哪里还不确定、哪里只是推测，说出来。
+5. 取舍：这一轮只能推进一点，说清推进了哪一点、剩下的为什么先放着。
+   不要把所有相关材料都摆出来——摆全了读者拿不到结论。
+6. 标边界：哪里还不确定、哪里只是推测，说出来。
 
-不确定就写不确定。允许答案是"现在还不能定"。"""
+不确定就写不确定。允许答案是"现在还不能定"。
+
+先给判断，再给依据，最后给还缺什么。不要写成条目清单——清单把判断淹了。"""
 
 # What the turn has to produce. A research session that ends with the same
 # state it started in has done nothing, and nothing in the protocol can
@@ -121,24 +215,98 @@ def _situation(topic: str) -> list[str]:
     live = [i for i in items if str(i.get("status") or "").lower() not in
             ("refuted", "rejected", "killed", "retired")]
     if best:
-        lines.append("当前最佳解释：" + "；".join(str(i.get("title") or "") for i in best[:2]))
+        lines.append("当前最佳解释：" + "；".join(_short(i.get("title")) for i in best[:1]))
     elif live:
-        lines.append("候选解释：" + "；".join(str(i.get("title") or "") for i in live[:3]))
+        lines.append("候选解释：" + "；".join(_short(i.get("title")) for i in live[:2]))
     # The explanation under pressure is the one whose separator nobody has
     # run yet, or whose status says it is contested.
     pressured = [i for i in items if str(i.get("status") or "").lower() in
                  ("contested", "weakening", "challenged")]
-    for i in pressured[:2]:
-        lines.append(f"受质疑的解释：{i.get('title')} —— 分开它需要：{i.get('separator')}")
+    for i in pressured[:1]:
+        lines.append(f"受质疑的解释：{_short(i.get('title'))} —— 分开它需要：{_short(i.get('separator'))}")
     # The cheapest next test is the separator of an explanation that is still
     # live: it says what evidence would move the question, and moving the
     # question is the work.
-    for i in live[:2]:
+    for i in live[:1]:
         sep = str(i.get("separator") or "").strip()
         if sep:
-            lines.append(f"能分开它的证据：{sep}")
+            lines.append(f"能分开它的证据：{_short(sep, 160)}")
             break
     return lines
+
+
+def _short(text: Any, limit: int = 110) -> str:
+    """Trim a long field to its first clause.
+
+    The separators are written for the record and run to several hundred
+    characters. Injected, they eat the budget that the standing and the
+    alignment check need, and the point of a separator - that an
+    observation would tell two explanations apart - survives the first
+    sentence.
+    """
+    t = " ".join(str(text or "").split())
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    for sep in ("。", "; ", "；", ". "):
+        idx = cut.rfind(sep)
+        if idx > limit * 0.5:
+            return cut[: idx + len(sep)].rstrip()
+    return cut.rstrip() + "…"
+
+
+def _standing(topic: str) -> list[str]:
+    """Where the project stands: the goal, the phase, the current task.
+
+    These three sit above the evidence. The core question says what the
+    project is about; the goal says what it is trying to get at; the
+    current task says what is being done right now. An agent that sees only
+    the current task will do it well and drift.
+    """
+    m = read_map(topic)
+    lines: list[str] = []
+    goal = str(m.get("goal") or "").strip()
+    if goal:
+        lines.append(f"课题目标：{goal}")
+    phase = str(m.get("phase") or "").strip()
+    if phase:
+        lines.append(phase_thinking(phase))
+    task = str(m.get("current_task") or "").strip()
+    if task:
+        lines.append(f"当前任务：{task}")
+    return lines
+
+
+def _alignment(topic: str) -> list[str]:
+    """Ask, every turn, whether the current task still serves the core
+    question.
+
+    Drift is the failure that no local check catches. Every claim in the
+    ledger can be sourced, every inference can be within its premises, and
+    the project can still have become a different project - a pile of
+    well-supported facts about a question nobody is asking any more.
+
+    So the alignment is stated on every turn, with both sides of it: the
+    core question, and the current task. The agent is asked to notice the
+    gap. Nothing is blocked; the point is that the gap is visible while
+    there is still time to close it.
+    """
+    m = read_map(topic)
+    core = str(m.get("core_question") or "").strip()
+    task = str(m.get("current_task") or "").strip()
+    goal = str(m.get("goal") or "").strip()
+    if not task:
+        return []
+    if not core and not goal:
+        return []
+    # One line. The standing is already stated just above, so repeating it
+    # here would spend the budget on a copy. What this line has to do is
+    # put the task and the question next to each other and ask.
+    side = f"（目标：{_short(goal, 60)}）" if goal else ""
+    return [
+        f"对齐检查：当前任务「{_short(task, 60)}」还在推进核心问题吗{side}？"
+        f"若只是在解决更小的子问题，说出来，并说要不要调任务或换阶段。"
+    ]
 
 
 def build_research_block(topic: str, config: dict[str, Any] | None = None) -> str:
@@ -152,8 +320,21 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
 
     lines = [f"[Research OS · {topic}]"]
     lines.append(f"核心问题：{m.get('core_question', '')}")
-    # The situation comes first: what the state of play is, not a list of
-    # things someone wrote down once.
+    # Where the project stands comes before what is known. The goal, the
+    # phase and the current task are what the turn is for; the evidence is
+    # what the turn works with.
+    lines.extend(_standing(topic))
+    # The phase decides the shape of the answer, not only the way of
+    # thinking about it. A model that gathers evidence while it should be
+    # weighing explanations produces a list of findings with no position in
+    # it, and a list of findings is what the reader cannot use.
+    phase = str(m.get("phase") or "").strip()
+    if phase:
+        shape = phase_output(phase)
+        if shape:
+            lines.append(f"这轮要交出的东西：{shape}")
+    # The situation comes next: the state of play, not a list of things
+    # someone wrote down once.
     lines.extend(_situation(topic))
     if not any(
         ln.startswith(("当前最佳解释", "候选解释", "受质疑", "能分开")) for ln in lines
@@ -161,7 +342,9 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
         lines.append("竞争解释：" + " ｜ ".join(hyp))
     if open_q:
         lines.append("待解问题：" + " ｜ ".join(open_q[:2]))
-    # The thinking rules come before the claim rules. A mode that leads with
+    # The alignment check: the drift that no local check catches.
+    lines.extend(_alignment(topic))
+    # The thinking moves come before the claim rules. A mode that leads with
     # the format teaches the model to fill the format; a mode that leads with
     # the thinking teaches it to think, and the ledger is where the thinking
     # gets recorded.
@@ -206,11 +389,13 @@ def _truncate(block: str, cap: int) -> str:
     # an agent told to "record it" writes into prose, and the ledger stays
     # empty while the answer looks complete.
     tool_line = "做完整之后用 research_mode(action='claim', project='<课题>', claim={...}) 记下来。"
-    # The situational lines come first: they are what the turn is about, and
-    # the rules are how to work on it. Losing the situation to keep a rule
-    # inverts the block.
+    # The standing and the alignment check come first: they are what the
+    # turn is for, and the rules are how to work on it. Losing the standing
+    # to keep a rule inverts the block.
     priority = re.compile(
-        r"^(\[Research OS|核心问题：|当前最佳解释|候选解释|受质疑的解释|"
+        r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|对齐检查|"
+        r"  课题目标：|  核心问题：|  当前任务：|  若当前任务|"
+        r"当前最佳解释|候选解释|受质疑的解释|"
         r"能分开它的证据|竞争解释：|待解问题：|如果用户这轮|（以上仅属于)"
     )
     kept: list[str] = []
@@ -238,9 +423,9 @@ def _truncate(block: str, cap: int) -> str:
     else:
         line = clip(tool_line)
         cost = len(line) + 1
-        if used + cost <= cap:
+        if used + cost <= cap and not any(tool_line in k for k in kept):
             kept.append(line)
-        else:
+        elif used + cost > cap:
             # Make room by dropping the least important block first.
             for i in range(len(kept) - 1, -1, -1):
                 if kept[i] in blocks and kept[i] is not blocks[0]:

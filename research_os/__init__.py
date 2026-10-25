@@ -156,6 +156,13 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'hypothesis' puts an untested idea on the table — proposing one is "
         "research, so it has its own action rather than being bent into a claim. "
         "ACTION 'map' updates the research map (core_question, hypotheses, tags, open_questions). "
+        "ACTION 'set_state' says where the project stands: 'goal' (what it is trying to get at), "
+        "'phase' (scoping | evidence | weighing | closing | writing - each phase calls for a "
+        "different way of thinking, and the phase changes how the next turn is worked on), and "
+        "'current_task' (what is being done right now). ACTION 'review' records a global review - "
+        "whether the work is still serving the core question, with a verdict "
+        "(on_track | drifting | off_track) and the reason. A project can drift without any single "
+        "claim being wrong, so the alignment is recorded explicitly. "
         "Call 'on' when the user asks why something happens, whether evidence can "
         "separate explanations, for a literature review, for a hypothesis, or when a "
         "claim needs verification. Do NOT call for chores: file conversion, imports, "
@@ -169,6 +176,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "enum": [
                     "on", "off", "status", "list", "create", "switch",
                     "contradict", "question", "hypothesis", "map",
+                    "set_state", "review",
                     "delete", "claim", "validate", "repair",
                 ],
                 "description": "What to do.",
@@ -224,6 +232,47 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "For action 'question': the open question being closed. Closing a "
                     "question is a research act, not housekeeping — the answer goes in "
                     "'question' and the closed one stops being open."
+                ),
+            },
+            "goal": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': what this project is trying to get at. "
+                    "Broader than the core question - the core question is the point, "
+                    "the goal is the aim."
+                ),
+            },
+            "phase": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': which phase the project is in. One of "
+                    "scoping | evidence | weighing | closing | writing. The phase "
+                    "decides how the next turn thinks: scoping frames the question, "
+                    "evidence gathers against a stated expectation, weighing pits the "
+                    "explanations against each other, closing calibrates the strength "
+                    "of the conclusion, writing shapes it for a reader."
+                ),
+            },
+            "current_task": {
+                "type": "string",
+                "description": (
+                    "For action 'set_state': what is being worked on right now. The "
+                    "narrowest of the three levels - and the one that most easily "
+                    "drifts away from the core question without anyone noticing."
+                ),
+            },
+            "verdict": {
+                "type": "string",
+                "description": (
+                    "For action 'review': on_track | drifting | off_track. Whether "
+                    "the work is still serving the core question."
+                ),
+            },
+            "review_note": {
+                "type": "string",
+                "description": (
+                    "For action 'review': what the review found. A verdict without a "
+                    "reason cannot be acted on."
                 ),
             },
             "hypothesis": {
@@ -568,6 +617,78 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 }
             )
 
+        if action == "set_state":
+            # Where the project stands: the goal, the phase, the current
+            # task. The agent sets these itself - it is the one that knows
+            # whether the work has moved on to a different question.
+            if not project:
+                return fail("project is required")
+            goal = args.get("goal")
+            phase = args.get("phase")
+            task = args.get("current_task")
+            if goal is None and phase is None and task is None:
+                return fail(
+                    "give at least one of: goal (what this project is trying "
+                    "to get at), phase (scoping/evidence/weighing/closing/"
+                    "writing), current_task (what is being done right now)"
+                )
+            if phase is not None:
+                key = str(phase).strip()
+                if key not in _protocol.PHASES:
+                    return fail(
+                        f"unknown phase {key!r}. Phases: "
+                        + ", ".join(sorted(_protocol.PHASES))
+                    )
+            before = _state.read_phase(project)
+            m = _state.write_state(
+                project,
+                goal=goal,
+                phase=phase,
+                current_task=task,
+            )
+            if phase is not None and str(phase).strip() != before:
+                _state.record_phase_change(
+                    project, before, str(phase).strip(), str(args.get("note") or "")
+                )
+            return ok(
+                {
+                    "goal": m.get("goal"),
+                    "phase": m.get("phase"),
+                    "current_task": m.get("current_task"),
+                }
+            )
+
+        if action == "review":
+            # A recorded global review: did the work stay on the core
+            # question? The drift that no per-claim check can catch is
+            # recorded here, in one place, so it can be read back.
+            if not project:
+                return fail("project is required")
+            verdict = str(args.get("verdict") or "").strip()
+            if not verdict:
+                return fail(
+                    "verdict is required: on_track | drifting | off_track"
+                )
+            note = str(args.get("review_note") or args.get("note") or "").strip()
+            if not note:
+                return fail(
+                    "review_note is required: what the review found. A verdict "
+                    "without a reason cannot be acted on."
+                )
+            m = _state.read_map(project)
+            reviews = list(m.get("reviews") or [])
+            entry = {
+                "verdict": verdict,
+                "note": note,
+                "at": _state.now(),
+                "phase": m.get("phase") or "",
+                "current_task": m.get("current_task") or "",
+            }
+            reviews.append(entry)
+            m["reviews"] = reviews[-20:]
+            _state.write_map(project, m)
+            return ok({"review": entry, "reviews": len(m["reviews"])})
+
         if action == "hypothesis":
             # A hypothesis is not a claim: it has no source and is not yet
             # true, but proposing one is the thing research does. It gets
@@ -683,15 +804,14 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
             ctx = _protocol.build_research_block(topic, cfg)
             # The last turn gathered evidence and recorded nothing. Say so
             # before the agent builds the next answer on top of it.
-            gap = _accounting_note(topic, previous_activity)
-            if gap:
-                ctx = f"{ctx}\n\n{gap}"
-            # The turn that just ended may have recorded without moving. Say
-            # so, so the next turn is asked for a move rather than more
-            # bookkeeping.
-            stalled = _no_movement_note(topic, previous_activity)
-            if stalled:
-                ctx = f"{ctx}\n\n{stalled}"
+            # The turn that just ended may have moved, or may have drifted.
+            # A note that says "you did not do X" pushes the agent into
+            # completing the form, which is the failure this project is
+            # against. What helps is a direction: where the project is, and
+            # what this phase is for.
+            directed = _direction_note(topic)
+            if directed:
+                ctx = f"{ctx}\n\n{directed}"
             # The map has competing explanations but nothing separating them,
             # or has judgments but no record of what is still open. The
             # protocol block is capped, so this goes in only when there is
@@ -753,68 +873,59 @@ def _map_gaps(topic: str) -> list[str]:
         items = (_state.read_contradictions(topic) or {}).get("items") or []
 
         wants = []
+        # A topic with no standing has no direction. The agent is asked to
+        # say where it is going, not told to fill in a form: the question is
+        # the thing that makes it think, and the answer is what the tool
+        # then records.
+        if not str(m.get("goal") or "").strip() or not str(m.get("current_task") or "").strip():
+            wants.append(
+                f"这个课题还没有方向：说清它要弄清什么（goal）、"
+                f"现在正在弄的那一块是什么（current_task）、"
+                f"以及现在处在哪一步（phase：{'/'.join(_protocol.PHASES)}）。"
+                f"用 research_mode(action='set_state', project='{topic}', ...) 记下来。"
+                f"没定方向就往下做，是这个课题最后变成一堆材料的唯一原因。"
+            )
         if len(hyp) >= 2 and not items:
             wants.append(
-                f"有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们——"
-                f"用 research_mode(action='contradict', project='{topic}', "
-                f"title='<哪个解释>', separator='<什么证据能区分>') 补上。"
+                f"有 {len(hyp)} 个竞争解释，但没记下什么证据能区分它们。"
+                f"这不是记账问题——是这几个解释现在没法互相淘汰，"
+                f"所以没有下一步可做。说出哪一个观察能分开它们。"
             )
         if has_judgment and not open_q:
             wants.append(
                 f"已经下了判断，但没记下哪里还悬着——"
-                f"用 research_mode(action='question', project='{topic}', "
-                f"question='<还没解决的问题>') 记一条。"
+                f"说清这个判断在什么地方会不成立。"
             )
         return wants
     except Exception:
         return []
 
 
-def _accounting_note(topic: str, activity: dict[str, Any]) -> str:
-    """Ask for the ledger to be filled when a turn used evidence without
-    recording it. Empty string when there is nothing to say."""
-    evidence = int(activity.get("evidence") or 0)
-    ledger = int(activity.get("ledger") or 0)
-    moves = int(activity.get("moves") or 0)
-    if evidence == 0 or ledger > 0:
-        return ""
-    what = f"{evidence} 次检索" if evidence > 1 else "一次检索"
-    return (
-        f"[Research OS · 上一轮的账本还是空的]\n"
-        f"上一轮做了{what}，但账本里一条断言都没有——那些证据现在只存在于聊天记录里，"
-        f"下一个会话就找不回来了。\n"
-        f"动笔前先用 research_mode(action='claim', project='{topic}', claim={{...}}) "
-        f"把用到的证据记进去：观察和转述要填 source（PMID/DOI），"
-        f"推论要填 premises 和 inference_type，假设标成 hypothesis。"
-    )
+def _direction_note(topic: str) -> str:
+    """Where the project is and what this phase is for.
 
-
-def _no_movement_note(topic: str, activity: dict[str, Any]) -> str:
-    """Say that the last turn did not move the question.
-
-    The protocol asked for a move and the turn ended without one. Nothing
-    about that is an error - the agent may have had nothing new to add, or
-    may have been answering a question the topic does not need to track. But
-    a research session that repeatedly ends where it started is a research
-    session that is summarising, and that is worth one sentence.
+    This replaces the two notes that used to be here. One said "you
+    searched but recorded nothing", the other said "you did not move the
+    question". Both were accurate and both pushed the agent into completing
+    a form - which is the failure this project exists to prevent. A
+    research session that stops moving is not helped by being told it
+    stopped moving; it is helped by being told what the phase is for.
     """
-    if not activity:
+    try:
+        m = _state.read_map(topic)
+        phase = str(m.get("phase") or "").strip()
+        task = str(m.get("current_task") or "").strip()
+        if not phase and not task:
+            return ""
+        bits = ["[Research OS · 这轮的方向]"]
+        if task:
+            bits.append(f"当前任务：{task}")
+        shape = _protocol.phase_output(phase) if phase else ""
+        if shape:
+            bits.append(f"这个阶段要交出的是：{shape}")
+        return "\n".join(bits)
+    except Exception:
         return ""
-    moves = int(activity.get("moves") or 0)
-    ledger = int(activity.get("ledger") or 0)
-    evidence = int(activity.get("evidence") or 0)
-    if moves > 0:
-        return ""
-    if evidence == 0 and ledger == 0:
-        return ""
-    return (
-        f"[Research OS · 上一轮没有推进]\n"
-        f"上一轮{evidence} 次检索、{ledger} 条断言，但没有一条是推进："
-        f"没有新解释、没有区分证据、没有关掉的问题。\n"
-        f"这轮先想清楚要动哪一处——用 research_mode(action='contradict', "
-        f"project='{topic}', title='<哪个解释>', separator='<什么证据能区分>') "
-        f"提出或改写一个竞争解释，或用 action='question' 关掉一个待解问题。"
-    )
 
 
 # Tools that constitute a literature search. Reaching for one of these while
@@ -1246,39 +1357,21 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         if not topic or not _state.topic_exists(topic):
             return None
 
-        claims = _state.read_claims(topic)
-        known = "\n".join(str(c.get("content") or "") for c in claims)
-
-        if claims:
-            unaccounted = _audit.unaccounted_sentences(response, known)
-        else:
-            # An empty ledger means every assertion in the answer is
-            # unaccounted for. That is the case worth flagging, not the case
-            # worth ignoring.
-            unaccounted = _audit.assertive_sentences(response)
-        if not unaccounted:
-            return None
-
-        shown = unaccounted[:3]
-        lines = "\n".join(f"- {s_.strip()[:160]}" for s_ in shown)
-        more = f"（另有 {len(unaccounted) - len(shown)} 条）" if len(unaccounted) > len(shown) else ""
-        if claims:
-            reason = (
-                f"它们不在「{topic}」的账本里，所以没有经过四类断言的检查。"
+        # What this hook checks is the shape of the answer, not the
+        # bookkeeping. It used to list every sentence that was not in the
+        # ledger, which produced exactly the thing this project is against:
+        # a report of what was said and not said, in place of a position.
+        # The ledger still holds the claims; the answer has to carry a
+        # judgment.
+        if not _audit.has_position(response):
+            return (
+                f"{response}\n\n"
+                f"---\n"
+                f"*[Research OS] 这一轮给的是材料，没给判断。"
+                f"读者要自己合成，而合成正是最该有人做的一步。"
+                f"补一句你目前认为什么、依据哪几条、什么会改变它。*"
             )
-        else:
-            reason = (
-                f"「{topic}」的账本还是空的，所以这些断言都没有经过四类断言的检查。"
-            )
-        return (
-            f"{response}\n\n"
-            f"---\n"
-            f"*[Research OS] 下面 {len(unaccounted)} 条断言没有记进账本{more}：\n"
-            f"{lines}\n\n"
-            f"{reason}"
-            f"要么用 research_mode(action='claim') 补记并标好 kind，"
-            f"要么改写成明确标注的推论或假设。*"
-        )
+        return None
     except Exception:
         return None
 

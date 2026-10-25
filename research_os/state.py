@@ -76,7 +76,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "obsidian_subdir": "ResearchOS",
     "obsidian_enabled": True,
     "inject_protocol": True,
-    "max_inject_chars": 900,
+    # The block carries the project's standing, the situation, the thinking
+    # moves and what the phase is for. It is long because the alternative is
+    # an agent that answers the question in front of it and forgets the one
+    # behind it.
+    "max_inject_chars": 1600,
     # How many literature searches one topic may run before the agent is asked
     # to record what it has or to say what it will conclude. This is a
     # prompt, not a wall: 0 turns the check off. The default is generous —
@@ -197,6 +201,73 @@ def delete_topic(topic: str, permanent: bool = False) -> str:
 
 def read_map(topic: str) -> dict[str, Any]:
     return _read_json(topic_dir(topic) / "research-map.json", {})
+
+
+# The three levels of a topic's state.
+#
+# A topic is not one question but a project with a direction, and an agent
+# working on it for a while needs to know where it stands at three levels.
+# The core question is the point of the whole thing and rarely changes. The
+# goal is what this project is trying to get at. The current task is what
+# is being done right now. Without all three, a session drifts: the agent
+# answers the question in front of it and forgets the one behind it.
+#
+# They are stored apart on purpose, so a review can say "the current task
+# is fine but the goal is not what the core question asks" - which is the
+# drift worth catching.
+MAP_GOAL = "goal"
+MAP_PHASE = "phase"
+MAP_TASK = "current_task"
+
+
+def read_goal(topic: str) -> str:
+    """What this project is trying to get at. Broader than the core question."""
+    return str(read_map(topic).get(MAP_GOAL) or "").strip()
+
+
+def read_phase(topic: str) -> str:
+    """Which phase the project is in. See PHASES in protocol.py."""
+    return str(read_map(topic).get(MAP_PHASE) or "").strip()
+
+
+def read_current_task(topic: str) -> str:
+    """What is being worked on right now. The narrowest of the three."""
+    return str(read_map(topic).get(MAP_TASK) or "").strip()
+
+
+def write_state(
+    topic: str,
+    goal: str | None = None,
+    phase: str | None = None,
+    current_task: str | None = None,
+) -> dict[str, Any]:
+    """Update the topic's standing, keeping the fields not being changed."""
+    m = read_map(topic)
+    if goal is not None:
+        m[MAP_GOAL] = str(goal).strip()
+    if phase is not None:
+        m[MAP_PHASE] = str(phase).strip()
+    if current_task is not None:
+        m[MAP_TASK] = str(current_task).strip()
+    write_map(topic, m)
+    return m
+
+
+def record_phase_change(topic: str, from_phase: str, to_phase: str, note: str = "") -> None:
+    """Keep the phase history. A project that changes direction should be
+    able to show when it did and why."""
+    m = read_map(topic)
+    hist = list(m.get("phase_history") or [])
+    hist.append(
+        {
+            "from": from_phase,
+            "to": to_phase,
+            "note": str(note or ""),
+            "at": now(),
+        }
+    )
+    m["phase_history"] = hist[-20:]
+    write_map(topic, m)
 
 
 def write_map(topic: str, data: dict[str, Any]) -> None:

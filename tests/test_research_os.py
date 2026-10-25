@@ -2305,6 +2305,14 @@ def test_a_sub_topic_sees_its_parent_and_its_siblings():
     out2 = _tool(action="set_state", project=a, parent=a)
     assert "error" in out2, out2
 
+    # The tool answers with the tree, not only the files. An agent that
+    # has to read the files to find out where it is will not bother.
+    st = _tool(action="status", project=a)
+    assert st["project"]["parent"]["name"] == parent, st
+    assert {x["name"] for x in st["project"]["siblings"]} == {b}, st
+    st2 = _tool(action="status", project=parent)
+    assert {x["name"] for x in st2["project"]["children"]} == {a, b}, st2
+
 
 def test_the_rules_survive_a_long_standing():
     """A project with a long narrative used to take the whole injection

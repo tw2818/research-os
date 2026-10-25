@@ -249,7 +249,18 @@ def list_topics() -> list[dict[str, Any]]:
                     "created_at": d.stat().st_mtime,
                     "discovered": True,
                 }
-    return [{"name": n, **meta} for n, meta in sorted(known.items())]
+    # The parent is on the map, not in the registry, so it has to be
+    # read from there. Without it a caller that only has the registry
+    # cannot see the shape of the tree - and the registry is what
+    # `list_topics` returns.
+    out = []
+    for n, meta in sorted(known.items()):
+        row = {"name": n, **meta}
+        parent = str(read_map(n).get(MAP_PARENT) or "").strip()
+        if parent:
+            row["parent"] = parent
+        out.append(row)
+    return out
 
 
 def topic_exists(topic: str) -> bool:

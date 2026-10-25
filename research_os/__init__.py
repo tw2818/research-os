@@ -637,6 +637,19 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "reviews": _state.read_review(project).get("reviews", 0),
                     "paused": _state.topic_is_paused(project),
                 }
+                # Where this topic sits in the tree. A sub-topic of a
+                # cross-domain review needs the question it serves and
+                # its siblings, and asking for them by reading the files
+                # is the thing this exists to stop.
+                parent = _state.read_parent(project)
+                if parent:
+                    out["project"]["parent"] = parent
+                siblings = _state.read_siblings(project)
+                if siblings:
+                    out["project"]["siblings"] = siblings
+                children = _state.read_children(project)
+                if children:
+                    out["project"]["children"] = children
             return ok(out)
 
         if action == "list":

@@ -1451,6 +1451,37 @@ def test_the_cycle_check_asks_for_a_judgment_when_only_material_accumulated():
     assert "判断" in out["context"]
 
 
+def test_the_review_demand_lands_at_the_search_boundary():
+    """The review has to come before the next search, not after the turn.
+
+    After the search it is only a note about the past. Before it, the
+    agent can still change what it does next.
+    """
+    m = _handler()
+    sid = "t-boundary"
+    m._tool_handler(
+        {"action": "create", "project": "BoundaryTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "BoundaryTopic"}, session_id=sid)
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    for _ in range(9):
+        m._post_tool_call(
+            tool_name="mcp__pubmed__pubmed_search_articles",
+            session_id=sid,
+            turn_id="t1",
+        )
+    # The next search is held until the review is done.
+    out = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        session_id=sid,
+        turn_id="t2",
+    )
+    assert out is not None
+    assert out.get("action") == "block"
+    assert "全局审查" in out["message"]
+
+
 def test_a_review_is_asked_for_after_enough_accumulation():
     """A drift that takes several turns to appear is not visible in any one
     of them, so the review looks at the topic, not the turn."""

@@ -301,6 +301,12 @@ _REVIEW_DEFAULTS: dict[str, Any] = {
     "last_verdict": "",
     "last_reason": "",
     "last_at": 0.0,
+    # How many times a review has been demanded without one being made. A
+    # demand that is ignored is a nag; after a couple of them the demand
+    # stops blocking and becomes a note, because a hook that keeps
+    # refusing the same tool is a stall and a stall is worse than a long
+    # search.
+    "demanded": 0,
 }
 
 
@@ -338,6 +344,18 @@ def note_turn_since_review(topic: str) -> int:
     return int(d["turns_since_review"])
 
 
+def note_review_demand(topic: str) -> int:
+    """Count a review that was asked for and not made."""
+    d = read_review(topic)
+    d["demanded"] = int(d.get("demanded") or 0) + 1
+    write_review(topic, d)
+    return int(d["demanded"])
+
+
+def review_demands(topic: str) -> int:
+    return int(read_review(topic).get("demanded") or 0)
+
+
 def topic_is_paused(topic: str) -> bool:
     return bool(read_review(topic).get("paused"))
 
@@ -363,6 +381,7 @@ def record_review(
     d["last_at"] = now()
     d["searches_since_review"] = 0
     d["turns_since_review"] = 0
+    d["demanded"] = 0
     # Only a verdict that found the work off the core question pauses it.
     # "continue" and "adjust" both keep the work going; "adjust" means the
     # direction is being changed and the state says so.

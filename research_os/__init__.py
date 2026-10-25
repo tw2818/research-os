@@ -1027,6 +1027,44 @@ _PHASE_FIT: dict[str, tuple[tuple[str, ...], str]] = {
 }
 
 
+def _review_due(topic: str) -> str | None:
+    """Say that a review is due, at the point where it can still change
+    what happens.
+
+    The counter is per topic, not per turn: a drift that takes three turns
+    to appear is not visible in any one of them, so the review has to look
+    at the topic rather than at the turn. The check sits at the search
+    boundary because that is where "stop and look at where you are" has
+    teeth - after the search it is only a note about the past.
+    """
+    try:
+        review = _state.read_review(topic)
+        if review.get("paused"):
+            return None
+        searches = int(review.get("searches_since_review") or 0)
+        turns = int(review.get("turns_since_review") or 0)
+        if searches < 8 and turns < 6:
+            return None
+        m = _state.read_map(topic)
+        narrative = str(m.get("narrative") or "").strip()
+        core = str(m.get("core_question") or "").strip()
+        return (
+            f"先停一下，做一次全局审查再继续检索。\n"
+            f"这个课题已经检索 {searches} 次、进行了 {turns} 轮工作。"
+            f"要判断三件事：\n"
+            f"（a）这些材料有没有改变原来的判断"
+            f"（现在记着的判断是：{narrative[:80] if narrative else '还没记下判断'}）？\n"
+            f"（b）现在的方向还服务核心问题（{core[:60]}）吗？\n"
+            f"（c）继续检索还值得吗，还是该收手？\n"
+            f"用 research_mode(action='review', project='{topic}', "
+            f"verdict='continue|redirect|pause', review_note='<理由>') 记下结论，"
+            f"判 redirect/pause 就同时用 action='set_state' 更新叙事和计划。"
+            f"审查完再检索。"
+        )
+    except Exception:
+        return None
+
+
 def _phase_fit_note(topic: str, message: str) -> str | None:
     """Name a request that belongs to a different phase than the topic is in.
 
@@ -1125,6 +1163,10 @@ def _cycle_check(topic: str, activity: dict[str, Any]) -> str | None:
                     f"用 research_mode(action='review', project='{topic}', "
                     f"verdict='continue|redirect|pause', review_note='<理由>') 记下来，"
                     f"判 redirect/pause 就同时用 action='set_state' 更新叙事和计划。"
+                )
+                lines.append(
+                    "现在就做这次审查——不用等下一轮。审查要给出判断，"
+                    "不是把材料再列一遍。"
                 )
 
         if not lines:
@@ -1395,7 +1437,11 @@ _WRITE_MARKERS = (
 )
 
 
-def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
+def _convergence_check(
+    session_id: str,
+    topic: str,
+    review_due: str | None = None,
+) -> dict[str, Any] | None:
     """Interrupt a search run that is not converging.
 
     A live run searched fifty times across three turns, recorded nothing and
@@ -1414,7 +1460,20 @@ def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
         if threshold <= 0:
             return None
         count = _state.topic_search_count(topic)
+        # The review is due earlier than the convergence check and it is the
+        # more important of the two: a run that stops searching because it
+        # was interrupted is a run that gave up, and a run that reviews where
+        # it is has decided something.
         if count < threshold:
+            if review_due is None:
+                return None
+            # The review is due before the search count is. It is the more
+            # important of the two: a run that stops searching because it
+            # was interrupted has given up, and a run that reviews where it
+            # is has decided something.
+            demanded = _state.note_review_demand(topic)
+            if demanded <= 2:
+                return {"action": "block", "message": review_due}
             return None
         reminded = _state.topic_search_reminded(topic)
         if reminded >= 2:
@@ -1436,18 +1495,18 @@ def _convergence_check(session_id: str, topic: str) -> dict[str, Any] | None:
                 f"这个课题已经检索了 {count} 次，账本里有 {len(claims)} 条断言：\n"
                 f"{listed}\n"
                 f"（只列了最后 8 条）\n"
-                f"先看这个清单：已经记过的不要再记一遍，重复的记录不算新的证据。"
-                f"缺什么就补什么——缺的用 research_mode(action='claim') 记下来"
-                f"（观察和转述填 source，推论填 premises 和 inference_type），"
-                f"然后用现有证据给出结论，不要为了再找一篇而无限检索。"
+                f"已经记过的不要再记一遍。现在该收口了：就手上的证据给出判断——"
+                f"你认为什么、依据哪几条、什么还不确定——"
+                f"而不是再找一篇让清单更长。"
             )
         else:
             body = (
                 f"这个课题已经检索了 {count} 次，但账本还是空的，回答也还没写出来。\n"
-                f"先停下来：用 research_mode(action='claim') 记下你已经找到的关键证据，"
-                f"或者直接就现有证据给出结论并说明哪些地方证据不足。"
+                f"先停下来：就手上已经找到的东西给出判断，说明哪些地方证据不足。"
                 f"继续检索不会让答案自己出现。"
             )
+        if review_due:
+            body = f"{review_due}\n\n{body}"
         return {
             "action": "block",
             "message": f"[Research OS · 该收口了]\n{body}",
@@ -1495,7 +1554,14 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             # The topic is open. A run that searches forever and never answers
             # is the failure this catches: interrupt, ask for a record or a
             # conclusion, then let the work continue.
-            return _convergence_check(session_id, topic)
+            #
+            # The review rides along with this interrupt rather than blocking
+            # on its own. A review the agent can ignore is a suggestion, and
+            # a hard block on every search past a count would stop a run
+            # that was about to conclude - which is the opposite of what the
+            # count is for.
+            due = _review_due(topic)
+            return _convergence_check(session_id, topic, review_due=due)
 
         # pre_tool_call cannot see the user message or the conversation. The
         # turn's synthetic/not verdict was recorded by pre_llm_call, which runs

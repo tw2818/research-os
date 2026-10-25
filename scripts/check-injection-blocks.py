@@ -20,14 +20,15 @@ from research_os import protocol, state  # noqa: E402
 REQUIRED = [
     ("核心问题", lambda m, b: str(m.get("core_question") or "")[:10] in b),
     ("课题目标", lambda m, b: str(m.get("goal") or "")[:10] in b),
-    ("当前阶段", lambda m, b: "当前阶段：" in b),
-    ("阶段思考", lambda m, b: protocol.phase_thinking(m.get("phase") or "").split("\n")[1][:10] in b),
+    ("当前阶段", lambda m, b: (not m.get("phase")) or "当前阶段：" in b),
+    ("阶段思考", lambda m, b: (not m.get("phase"))
+     or protocol.phase_thinking(m.get("phase") or "").split("\n")[1][:10] in b),
     ("当前任务", lambda m, b: str(m.get("current_task") or "")[:10] in b),
     ("当前判断", lambda m, b: (not m.get("narrative")) or str(m["narrative"])[:10] in b),
     ("下一步计划", lambda m, b: (not m.get("plan")) or str(m["plan"])[:10] in b),
-    ("阶段门槛", lambda m, b: "这轮不要做" in b),
-    ("输出形状", lambda m, b: "这轮要交出的东西" in b),
-    ("科研思维", lambda m, b: "给竞争解释" in b),
+    ("阶段门槛", lambda m, b: (not m.get("phase")) or "这轮不要做" in b),
+    ("输出形状", lambda m, b: (not m.get("phase")) or "这轮要交出的东西" in b),
+    ("科研思维", lambda m, b: "给可能答案" in b),
     ("tool 调用行", lambda m, b: "research_mode(action='claim'" in b),
 ]
 

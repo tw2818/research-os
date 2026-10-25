@@ -272,21 +272,35 @@ hermes plugins update research-os
 
 ### Moving the state tree
 
-`RESEARCH_OS_HOME` sets where the state lives, and it works for a
-script. It does not work for the agent: Hermes scrubs the environment
-of the tools it hands to the model, so the variable is gone by the time
-a hook runs, and an agent told to work in a separate tree silently
-works in the default one.
+Three places say where the state lives, and they are used in this order.
 
-So the location can also be written to a pointer file, which is read
-at import and therefore beyond the scrub:
+**The pointer file** — `$HERMES_HOME/research-os-home`, one line, the
+path to use. The installer writes it. It comes first because it belongs
+to the installation, and because an export left in a shell is a
+temporary override that someone forgot about: one of those redirects
+the installer, the CLI and the plugin all at once to a directory that
+has nothing to do with the install, and nothing says so.
+
+**`RESEARCH_OS_HOME`** — the per-process override, for a script that
+wants a different tree for one run. It is read only when there is no
+pointer file.
+
+**The default** — `$HERMES_HOME/research-os`.
+
+The pointer is read on every use, not once at import. The plugin is
+loaded by the gateway, and the gateway is a long-running process, so a
+path decided at import time would need a gateway restart to change —
+which is the wrong shape for a file whose whole purpose is to say where
+the tree is without restarting anything.
 
 ```bash
 echo /path/to/state > ~/.hermes/research-os-home
 ```
 
-The environment variable still wins when it is actually set, so a
-one-off script that sets it does what it says.
+**Hermes scrubs the environment of the tools it hands to the model**,
+so `RESEARCH_OS_HOME` set for a one-shot process is gone by the time a
+hook runs. That is why the pointer file exists, and why it is a file
+rather than a variable.
 
 ---
 

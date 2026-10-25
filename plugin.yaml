@@ -1,5 +1,5 @@
 name: research-os
-version: "0.3.2"
+version: "0.4.0"
 description: "Research-thinking controller: the agent opens research mode itself, a pre_tool_call hook holds literature searches until a topic exists, a post_tool_call hook tracks what each turn did with evidence, and a transform_llm_output hook checks the outgoing answer against a per-topic claim ledger (observation / report / inference / hypothesis)."
 author: "tweb"
 license: MIT

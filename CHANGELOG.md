@@ -59,18 +59,32 @@ record of the work was missing.
   by accident.** `RESEARCH_OS_HOME` is not visible to the agent: Hermes
   scrubs the environment of the tools it hands to the model, so a
   variable set for a one-shot process is gone by the time a hook runs.
-  The pointer file `~/.hermes/research-os-home` is read instead — but it
-  was read at import, and the plugin is loaded by a gateway that lives
-  for months, so changing it needed a gateway restart. The path is now
-  resolved on every use, and a changed pointer takes effect inside a
-  process that has already imported the module.
+  A pointer file is used instead — but it was read at import, and the
+  plugin is loaded by a gateway that lives for months, so changing it
+  needed a gateway restart. The path is now resolved on every use, and
+  a changed pointer takes effect inside a process that has already
+  imported the module.
 
-  The pointer file also comes first now. An export left in a shell
-  redirected the installer, the CLI and the plugin all at once to a
-  directory that had nothing to do with the install, and nothing said
-  so. The pointer file belongs to the installation; the environment
-  variable is a temporary override, and one that someone forgot about
-  is worse than none.
+  The pointer comes first, and it lives under `HERMES_HOME`, so the
+  tree moves with the Hermes home. An export left in a shell redirected
+  the installer, the CLI and the plugin all at once to a directory that
+  had nothing to do with the install, and nothing said so. The pointer
+  belongs to the installation; the environment variable is a
+  per-process override, read only when there is no pointer.
+- **A research question outside biomedicine was not recognised as
+  research.** The classifier's word list was mostly biomedical and
+  statistical — p values, effect sizes, cohort, meta-analysis — and its
+  question shapes were the ones that end in a question mark. So "is it
+  A or B", the shape most research questions have, was not a question
+  at all, and a question about a text, a proof, a design or an
+  argument was not a research request. The agent answered it with no
+  research discipline and nothing said that anything was missing. The
+  word list and the question shapes are both wider now.
+- **A delete did not leave research mode.** "删除文件" was in the chore
+  list and "删掉这个文件" was not. A chore is what takes a session out of
+  research mode, so an unrecognised one left the agent in research mode
+  with the research block still riding along on a turn that was
+  deleting a file.
 - **The rules carried one researcher's questions into every field.** The
   moves came from a bench experiment, and so did their wording: "what
   observation would separate these two explanations", "at least two

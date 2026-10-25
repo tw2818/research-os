@@ -12,6 +12,11 @@ import tempfile
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp(prefix="research-os-test-")
+# HERMES_HOME is set as well as RESEARCH_OS_HOME, because the pointer
+# file is looked for under HERMES_HOME. Setting only the second one
+# left the developer's own pointer file in charge of the test - and the
+# test failed on a tree that had nothing to do with it.
+os.environ["HERMES_HOME"] = _TMP
 os.environ["RESEARCH_OS_HOME"] = _TMP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -2174,7 +2179,7 @@ def test_the_state_tree_follows_the_pointer_file_without_a_restart():
     So the path is read on every use, and a changed pointer is visible
     inside a process that has already imported the module.
     """
-    pointer = Path.home() / ".hermes" / "research-os-home"
+    pointer = state._pointer_path()
     had = pointer.read_text() if pointer.is_file() else None
     try:
         pointer.write_text(str(Path(_TMP) / "elsewhere") + "\n")
@@ -2199,7 +2204,7 @@ def test_the_pointer_file_wins_over_a_stale_environment_variable():
     installer. The environment variable is a temporary override, and a
     temporary override someone forgot about is worse than none.
     """
-    pointer = Path.home() / ".hermes" / "research-os-home"
+    pointer = state._pointer_path()
     had = pointer.read_text() if pointer.is_file() else None
     old_env = os.environ.get("RESEARCH_OS_HOME")
     try:
@@ -2228,6 +2233,54 @@ def test_the_installer_writes_the_pointer_file():
     # And the flag has to win over a stale export.
     assert 'STATE_HOME="$HERMES_HOME/research-os"' in src
     assert "STATE_HOME=\"${RESEARCH_OS_HOME:-" not in src
+
+
+def test_research_is_recognised_outside_the_lab_bench():
+    """The classifier decides whether the research block is injected at
+    all, and its word list was mostly biomedical and statistical: p
+    values, effect sizes, cohort, meta-analysis.
+
+    So a question about a text, a proof, a design or an argument was
+    not recognised as a research request. The agent answered it with no
+    research discipline, and nothing said that anything was missing.
+
+    A disjunction is a research question in every field. "Is it A or B"
+    is the shape of most research questions, and the old list only
+    recognised the shapes that end in a question mark.
+    """
+    research = [
+        "这份手稿里的自然指的是自然规律还是事物本性？",
+        "缓存策略该用 LRU 还是按访问频率加权？",
+        "这个等价关系用归纳法还是良基归纳证明？",
+        "为什么这个手稿里的自然一词前后不一致？",
+        "这个设计的取舍是什么？",
+        "帮我查一下这个定理有没有反例",
+        "这个解释有没有被文本证据支持？",
+    ]
+    for text in research:
+        assert classify.classify(text) == "research", text
+
+
+def test_a_chore_still_leaves_research_mode():
+    """A chore is what takes a session out of research mode, so a chore
+    that was not recognised left the agent in research mode with the
+    research block still riding along - on a turn that was deleting a
+    file.
+
+    "删除文件" was in the list and "删掉这个文件" was not. The verbs an
+    instruction actually uses are the ones that have to be there.
+    """
+    chores = [
+        "帮我删掉这个文件",
+        "把这个删了",
+        "移除那个目录",
+        "把这段代码格式化",
+        "重启 gateway",
+        "帮我把这个 pdf 转成 markdown",
+        "install this package",
+    ]
+    for text in chores:
+        assert classify.classify(text) == "chore", text
 
 
 def test_the_tool_description_lists_every_phase():

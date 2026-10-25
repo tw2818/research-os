@@ -29,36 +29,38 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+def _hermes_home() -> Path:
+    """The Hermes home, which is where the plugin and its state live."""
+    env = os.environ.get("HERMES_HOME", "").strip()
+    return Path(env).expanduser() if env else Path.home() / ".hermes"
+
+
+def _pointer_path() -> Path:
+    """The file that says where the state tree is."""
+    return _hermes_home() / "research-os-home"
+
+
 def _resolve_home() -> Path:
     """Where the state tree lives.
 
-    The environment variable is the obvious way to say it and it works
-    for a script. It does not work for the agent, though: Hermes scrubs
-    the environment of the tools it hands to the model, so a variable
-    set for the one-shot process is gone by the time a hook runs. An
-    agent that was told to work in a separate tree silently worked in
-    the default one, which is the kind of failure that is invisible
-    until you look for the files.
+    Three sources, in the order that matches how each one is meant to be
+    used.
 
-    So there is a pointer file as well, read at import time and
-    therefore beyond the scrub:
-        ~/.hermes/research-os-home   -> one line, the path to use
-    The environment variable still wins when it is actually there, so
-    a script that sets it for a one-off still does what it says.
+    The pointer file belongs to the installation: the installer writes
+    it, and it says where that install's state lives. It comes first,
+    because an export left in someone's shell is a temporary override
+    that someone forgot about, and one of those redirects the installer,
+    the CLI and the plugin all at once to a directory that has nothing
+    to do with the install - and nothing says so.
+
+    The environment variable is the per-process override, for a script
+    that wants a different tree for one run. It is read only when there
+    is no pointer, which is the case before the first install and for a
+    tree that is not the installed one.
+
+    The default is the installed location.
     """
-    # The pointer file first, the environment variable second.
-    #
-    # The pointer file belongs to the installation: it is written by the
-    # installer and it says where that install's state lives. The
-    # environment variable is a temporary override, and a temporary
-    # override that someone forgot about is worse than none: an export
-    # left in a shell redirected the installer, the CLI and the plugin
-    # all at once, to a directory that had nothing to do with the
-    # install, and nothing said so.
-    #
-    # A one-off script that genuinely wants a different tree can move
-    # the pointer, or run against a copy of the tree.
-    pointer = Path.home() / ".hermes" / "research-os-home"
+    pointer = _pointer_path()
     try:
         if pointer.is_file():
             target = pointer.read_text(errors="replace").strip()
@@ -69,23 +71,9 @@ def _resolve_home() -> Path:
     env = os.environ.get("RESEARCH_OS_HOME", "").strip()
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".hermes" / "research-os"
+    return _hermes_home() / "research-os"
 
 
-# The paths are resolved on every use, not once at import.
-#
-# The plugin is loaded by the gateway, and the gateway is a long-running
-# process: it imported this module when it started and will import it
-# again only when it restarts. A path computed at import time is
-# therefore frozen for as long as the gateway lives, so pointing the
-# state tree somewhere else - a new pointer file, a changed
-# environment - would need a gateway restart to take effect. That is the
-# wrong shape for this: the pointer file exists precisely so the
-# location can be changed without restarting anything.
-#
-# So the paths are computed on access. The cost is a stat and a read of
-# a one-line file per access, which is nothing next to what a hook does
-# around it.
 def home() -> Path:
     """Where the state tree is, right now."""
     return _resolve_home()

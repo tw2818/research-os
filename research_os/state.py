@@ -29,7 +29,38 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-HOME = Path(os.environ.get("RESEARCH_OS_HOME", Path.home() / ".hermes" / "research-os"))
+def _resolve_home() -> Path:
+    """Where the state tree lives.
+
+    The environment variable is the obvious way to say it and it works
+    for a script. It does not work for the agent, though: Hermes scrubs
+    the environment of the tools it hands to the model, so a variable
+    set for the one-shot process is gone by the time a hook runs. An
+    agent that was told to work in a separate tree silently worked in
+    the default one, which is the kind of failure that is invisible
+    until you look for the files.
+
+    So there is a pointer file as well, read at import time and
+    therefore beyond the scrub:
+        ~/.hermes/research-os-home   -> one line, the path to use
+    The environment variable still wins when it is actually there, so
+    a script that sets it for a one-off still does what it says.
+    """
+    env = os.environ.get("RESEARCH_OS_HOME", "").strip()
+    if env:
+        return Path(env).expanduser()
+    pointer = Path.home() / ".hermes" / "research-os-home"
+    try:
+        if pointer.is_file():
+            target = pointer.read_text(errors="replace").strip()
+            if target:
+                return Path(target).expanduser()
+    except OSError:
+        pass
+    return Path.home() / ".hermes" / "research-os"
+
+
+HOME = _resolve_home()
 CONFIG_PATH = HOME / "config.json"
 PROJECTS_PATH = HOME / "projects.json"
 SESSIONS_DIR = HOME / "sessions"

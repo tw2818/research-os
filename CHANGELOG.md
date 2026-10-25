@@ -53,6 +53,18 @@ record of the work was missing.
   sources go there; if it is not, they go to files. `literature_backend`
   in the config pins the preference.
 
+### Fixed
+
+- **The state tree could not be moved.** `RESEARCH_OS_HOME` set the
+  location, and it works for a script — but Hermes scrubs the
+  environment of the tools it hands to the model, so the variable was
+  gone by the time a hook ran. An agent told to work in a separate tree
+  silently worked in the default one, and the only symptom was the
+  files not being where they were supposed to be. The location is now
+  also read from `~/.hermes/research-os-home` (one line, the path to
+  use), which survives the scrub. The environment variable still wins
+  when it is actually there.
+
 ### Changed
 
 - The Zotero filing tools — creating an item, importing a PDF — count as

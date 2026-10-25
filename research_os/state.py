@@ -46,9 +46,18 @@ def _resolve_home() -> Path:
     The environment variable still wins when it is actually there, so
     a script that sets it for a one-off still does what it says.
     """
-    env = os.environ.get("RESEARCH_OS_HOME", "").strip()
-    if env:
-        return Path(env).expanduser()
+    # The pointer file first, the environment variable second.
+    #
+    # The pointer file belongs to the installation: it is written by the
+    # installer and it says where that install's state lives. The
+    # environment variable is a temporary override, and a temporary
+    # override that someone forgot about is worse than none: an export
+    # left in a shell redirected the installer, the CLI and the plugin
+    # all at once, to a directory that had nothing to do with the
+    # install, and nothing said so.
+    #
+    # A one-off script that genuinely wants a different tree can move
+    # the pointer, or run against a copy of the tree.
     pointer = Path.home() / ".hermes" / "research-os-home"
     try:
         if pointer.is_file():
@@ -57,15 +66,61 @@ def _resolve_home() -> Path:
                 return Path(target).expanduser()
     except OSError:
         pass
+    env = os.environ.get("RESEARCH_OS_HOME", "").strip()
+    if env:
+        return Path(env).expanduser()
     return Path.home() / ".hermes" / "research-os"
 
 
-HOME = _resolve_home()
-CONFIG_PATH = HOME / "config.json"
-PROJECTS_PATH = HOME / "projects.json"
-SESSIONS_DIR = HOME / "sessions"
-TOPICS_DIR = HOME / "topics"
-TRASH_DIR = HOME / ".trash"
+# The paths are resolved on every use, not once at import.
+#
+# The plugin is loaded by the gateway, and the gateway is a long-running
+# process: it imported this module when it started and will import it
+# again only when it restarts. A path computed at import time is
+# therefore frozen for as long as the gateway lives, so pointing the
+# state tree somewhere else - a new pointer file, a changed
+# environment - would need a gateway restart to take effect. That is the
+# wrong shape for this: the pointer file exists precisely so the
+# location can be changed without restarting anything.
+#
+# So the paths are computed on access. The cost is a stat and a read of
+# a one-line file per access, which is nothing next to what a hook does
+# around it.
+def home() -> Path:
+    """Where the state tree is, right now."""
+    return _resolve_home()
+
+
+def config_path() -> Path:
+    return home() / "config.json"
+
+
+def projects_path() -> Path:
+    return home() / "projects.json"
+
+
+def sessions_dir() -> Path:
+    return home() / "sessions"
+
+
+def topics_dir() -> Path:
+    return home() / "topics"
+
+
+def trash_dir() -> Path:
+    return home() / ".trash"
+
+
+# The names the rest of the package imported. They are kept as module
+# attributes for anything that reads them, but every use inside this
+# module goes through the functions above, so a change to the pointer
+# file is visible without a restart.
+HOME = home()
+CONFIG_PATH = home() / "config.json"
+PROJECTS_PATH = home() / "projects.json"
+SESSIONS_DIR = home() / "sessions"
+TOPICS_DIR = home() / "topics"
+TRASH_DIR = home() / ".trash"
 
 CLAIM_KINDS = ("observation", "report", "inference", "hypothesis")
 INFERENCE_TYPES = ("descriptive", "explanatory", "predictive", "analogy", "abductive")
@@ -166,14 +221,14 @@ def review_thresholds(topic: str | None = None) -> tuple[int, int]:
 
 def load_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
-    cfg.update(_read_json(CONFIG_PATH, {}))
+    cfg.update(_read_json(config_path(), {}))
     return cfg
 
 
 def save_config(patch: dict[str, Any]) -> dict[str, Any]:
     cfg = load_config()
     cfg.update(patch)
-    _write_json(CONFIG_PATH, cfg)
+    _write_json(config_path(), cfg)
     return cfg
 
 
@@ -187,19 +242,19 @@ def valid_topic_name(name: str) -> bool:
 
 
 def topic_dir(topic: str) -> Path:
-    return TOPICS_DIR / topic
+    return topics_dir() / topic
 
 
 def list_topics() -> list[dict[str, Any]]:
     """Registry first; fall back to disk so a hand-created dir is still visible."""
-    registry = _read_json(PROJECTS_PATH, {})
+    registry = _read_json(projects_path(), {})
     # The registry is trusted here, including entries whose directory is
     # gone. Those are orphans, and they are load-bearing: `on` and
     # `repair` find them through this list and rebuild them. Filtering
     # them out would hide the very thing those two actions exist for.
     known: dict[str, dict[str, Any]] = dict(registry.get("topics", {}))
-    if TOPICS_DIR.is_dir():
-        for d in sorted(TOPICS_DIR.iterdir()):
+    if topics_dir().is_dir():
+        for d in sorted(topics_dir().iterdir()):
             if d.is_dir() and d.name not in known:
                 known[d.name] = {
                     "core_question": "",
@@ -230,7 +285,7 @@ def create_topic(
     # refusing to create it meant that once a topic directory was removed
     # by anything other than delete_topic, the name could never be used
     # again.
-    if (TOPICS_DIR / topic).is_dir():
+    if (topics_dir() / topic).is_dir():
         raise ValueError(f"topic already exists: {topic}")
 
     d = topic_dir(topic)
@@ -255,14 +310,14 @@ def create_topic(
         f"# Decision log — {topic}\n\nCore question: {core_question.strip()}\n\n",
     )
 
-    registry = _read_json(PROJECTS_PATH, {"topics": {}})
+    registry = _read_json(projects_path(), {"topics": {}})
     registry.setdefault("topics", {})[topic] = {
         "core_question": core_question.strip(),
         "created_at": now(),
         "hypotheses": hyp,
         "tags": sorted({t.strip() for t in (tags or []) if t and t.strip()}),
     }
-    _write_json(PROJECTS_PATH, registry)
+    _write_json(projects_path(), registry)
     return registry["topics"][topic]
 
 
@@ -273,12 +328,12 @@ def delete_topic(topic: str, permanent: bool = False) -> str:
         shutil.rmtree(topic_dir(topic), ignore_errors=True)
         dest = ""
     else:
-        TRASH_DIR.mkdir(parents=True, exist_ok=True)
-        dest = TRASH_DIR / f"{topic}-{int(now())}"
+        trash_dir().mkdir(parents=True, exist_ok=True)
+        dest = trash_dir() / f"{topic}-{int(now())}"
         shutil.move(str(topic_dir(topic)), str(dest))
-    registry = _read_json(PROJECTS_PATH, {"topics": {}})
+    registry = _read_json(projects_path(), {"topics": {}})
     registry.get("topics", {}).pop(topic, None)
-    _write_json(PROJECTS_PATH, registry)
+    _write_json(projects_path(), registry)
     return str(dest)
 
 
@@ -938,7 +993,7 @@ def set_claim_status(topic: str, claim_id: str, status: str) -> dict[str, str]:
 
 def session_path(session_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "unknown")
-    return SESSIONS_DIR / f"{safe}.json"
+    return sessions_dir() / f"{safe}.json"
 
 
 def note_session_literature(session_id: str, backend: str) -> None:

@@ -40,7 +40,7 @@ except ImportError:  # installed layout: the modules are flat
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    for p in (state.HOME, state.SESSIONS_DIR, state.TOPICS_DIR):
+    for p in (state.home(), state.sessions_dir(), state.topics_dir()):
         p.mkdir(parents=True, exist_ok=True)
     cfg = state.load_config()
     if args.vault:
@@ -48,7 +48,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.subdir:
         cfg["obsidian_subdir"] = args.subdir
     state.save_config(cfg)
-    print(f"Research OS home: {state.HOME}")
+    print(f"Research OS home: {state.home()}")
     print(f"config: {json.dumps(cfg, ensure_ascii=False)}")
     return 0
 
@@ -124,7 +124,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    print(f"home: {state.HOME}")
+    print(f"home: {state.home()}")
     print(f"topics: {[t['name'] for t in state.list_topics()]}")
     sess = state.SESSIONS_DIR
     if sess.is_dir():

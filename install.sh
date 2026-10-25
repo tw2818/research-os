@@ -53,10 +53,23 @@ cp "$SRC"/research_os/*.py "$PLUGIN_DIR/"
 find "$PLUGIN_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---------------------------------------------------------------- state tree
+# --home decides. RESEARCH_OS_HOME is deliberately not consulted here:
+# a stale export in the user's shell would otherwise send the install
+# somewhere else without a word, and the flag they typed would be the
+# one that got ignored.
 STATE_HOME="$HERMES_HOME/research-os"
 export RESEARCH_OS_HOME="$STATE_HOME"
 echo "==> Initialising state at $STATE_HOME"
 python3 "$SRC/scripts/osctl.py" init ${VAULT:+--vault "$VAULT"} >/dev/null
+
+# The pointer file is how the plugin finds the state tree. The gateway
+# is a long-running process that imported the plugin when it started, so
+# a path decided at import time would need a gateway restart to change.
+# The plugin therefore reads this file on every access, and writing it
+# here is what makes a custom --home take effect.
+POINTER="$HERMES_HOME/research-os-home"
+printf '%s\n' "$STATE_HOME" > "$POINTER"
+echo "==> Pointer file: $POINTER -> $STATE_HOME"
 
 # Keep the CLI and the renderer next to the state, so they stay available
 # after the temporary clone is gone. The modules go with them: the CLI has to
@@ -96,5 +109,5 @@ echo
 echo "Done. Next:"
 echo "  1. restart the gateway:   hermes gateway restart"
 echo "  2. ask a research question — the agent opens research mode itself"
-echo "  3. list topics:           RESEARCH_OS_HOME='$STATE_HOME' python3 '$STATE_HOME/bin/osctl.py' topics"
-echo "  4. render the Obsidian notes:  RESEARCH_OS_HOME='$STATE_HOME' python3 '$STATE_HOME/bin/render_obsidian.py' --all"
+echo "  3. list topics:           python3 '$STATE_HOME/bin/osctl.py' topics"
+echo "  4. render the Obsidian notes:  python3 '$STATE_HOME/bin/render_obsidian.py' --all"

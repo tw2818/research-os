@@ -145,14 +145,13 @@ TOOL_SCHEMA: dict[str, Any] = {
         "ACTION 'off' leaves research mode. "
         "ACTION 'list' lists topics. "
         "ACTION 'create' makes a new topic (needs project + core_question — a topic "
-        "without a scientific question is not a research topic). "
+        "without a question to research is not a topic). "
         "ACTION 'delete' removes a topic (soft delete by default). "
         "ACTION 'repair' rebuilds missing topic state. "
         "ACTION 'claim' records a claim in the topic ledger (kind: observation/report/"
         "inference/hypothesis) and ACTION 'validate' checks the ledger. "
-        "ACTION 'contradict' records a competing explanation and what evidence would "
-        "separate it (title + separator — a contradiction with no way to resolve it is "
-        "just a worry). ACTION 'question' records an open question, and closes one when "
+        "ACTION 'contradict' records a rival reading and what would tell them apart "
+        "(title + separator — a rival with no way to resolve it is just a worry). ACTION 'question' records an open question, and closes one when "
         "given 'closed' (the question being closed) plus 'question' (what answered it). "
         "ACTION 'hypothesis' puts an untested idea on the table — proposing one is "
         "research, so it has its own action rather than being bent into a claim. "
@@ -166,7 +165,7 @@ TOOL_SCHEMA: dict[str, Any] = {
         "If there is no bibliography service available, use kind='file' with the path - the "
         "library still records it and the claim still cites it. "
         "ACTION 'set_state' says where the project stands: 'goal' (what it is trying to get at), "
-        "'phase' (scoping | evidence | weighing | closing | writing - each phase calls for a "
+        "'phase' (scoping | diverging | evidence | weighing | closing | writing - each phase calls for a "
         "different way of thinking, and the phase changes how the next turn is worked on), and "
         "'current_task' (what is being done right now). ACTION 'set_state' also takes "
         "'core_question' to redefine the question this topic is answering, with "
@@ -204,7 +203,7 @@ TOOL_SCHEMA: dict[str, Any] = {
             },
             "core_question": {
                 "type": "string",
-                "description": "The scientific question this topic addresses. Required for create.",
+                "description": "The question this topic addresses. Required for create.",
             },
             "source_kind": {
                 "type": "string",
@@ -641,7 +640,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 return fail("project is required")
             if not args.get("core_question"):
                 return fail(
-                    "core_question is required: a topic without a scientific question "
+                    "core_question is required: a topic without a question to research "
                     "is not a research topic — state the question first"
                 )
             hyp = _split_list(args.get("hypotheses"), sep="|")
@@ -1617,7 +1616,7 @@ def _is_state_path(path: str) -> bool:
             target = target.resolve()
         except OSError:
             pass
-        home = _state.HOME.resolve()
+        home = _state.home().resolve()
     except Exception:
         return False
     try:
@@ -1706,7 +1705,7 @@ def _state_tree_spans(text: str) -> list[tuple[int, int]]:
     """Where the state tree is named in the text."""
     spans: list[tuple[int, int]] = []
     try:
-        home = str(_state.HOME.resolve())
+        home = str(_state.home().resolve())
     except Exception:
         home = ""
     lowered = text.lower()

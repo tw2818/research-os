@@ -6,6 +6,7 @@ Run:  python3 -m pytest tests/ -q      (or)  python3 tests/test_research_os.py
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -1515,7 +1516,7 @@ def test_the_guard_does_not_fire_on_a_lookup():
         "grep -n 'def %s' /home/twebery/.hermes/plugins/research-os/state.py" % w
     ) is False
     assert _ros._mentions_state_tree(
-        "grep -rn '%s\|%s' /home/twebery/.hermes/research-os/" % (w, w2)
+        "grep -rn '%s\\|%s' /home/twebery/.hermes/research-os/" % (w, w2)
     ) is False
 
 
@@ -2161,6 +2162,110 @@ def test_the_moves_work_outside_the_lab_bench():
 
     # And the turn demand.
     assert "区分两个解释的观察" not in protocol.TURN_DEMAND
+
+
+def test_the_state_tree_follows_the_pointer_file_without_a_restart():
+    """The plugin is loaded by the gateway, and the gateway is a
+    long-running process. A path decided at import time is frozen for as
+    long as it lives, so pointing the state tree somewhere else would
+    need a gateway restart - and the pointer file exists precisely so
+    the location can be changed without one.
+
+    So the path is read on every use, and a changed pointer is visible
+    inside a process that has already imported the module.
+    """
+    pointer = Path.home() / ".hermes" / "research-os-home"
+    had = pointer.read_text() if pointer.is_file() else None
+    try:
+        pointer.write_text(str(Path(_TMP) / "elsewhere") + "\n")
+        assert state.home() == Path(_TMP) / "elsewhere", state.home()
+        pointer.write_text(str(Path(_TMP) / "third") + "\n")
+        assert state.home() == Path(_TMP) / "third", state.home()
+        assert state.topics_dir() == Path(_TMP) / "third" / "topics"
+    finally:
+        if had is None:
+            if pointer.is_file():
+                pointer.unlink()
+        else:
+            pointer.write_text(had)
+
+
+def test_the_pointer_file_wins_over_a_stale_environment_variable():
+    """An export left in a shell redirected the installer, the CLI and
+    the plugin all at once, to a directory that had nothing to do with
+    the install, and nothing said so.
+
+    The pointer file belongs to the installation and is written by the
+    installer. The environment variable is a temporary override, and a
+    temporary override someone forgot about is worse than none.
+    """
+    pointer = Path.home() / ".hermes" / "research-os-home"
+    had = pointer.read_text() if pointer.is_file() else None
+    old_env = os.environ.get("RESEARCH_OS_HOME")
+    try:
+        pointer.write_text(str(Path(_TMP) / "from-pointer") + "\n")
+        os.environ["RESEARCH_OS_HOME"] = str(Path(_TMP) / "from-env")
+        assert state.home() == Path(_TMP) / "from-pointer", state.home()
+    finally:
+        if old_env is None:
+            os.environ.pop("RESEARCH_OS_HOME", None)
+        else:
+            os.environ["RESEARCH_OS_HOME"] = old_env
+        if had is None:
+            if pointer.is_file():
+                pointer.unlink()
+        else:
+            pointer.write_text(had)
+
+
+def test_the_installer_writes_the_pointer_file():
+    """The installer is what puts the plugin and its state tree in the
+    same place, and the pointer file is how the plugin finds that tree
+    later - including after a gateway restart, when the environment
+    variable is long gone."""
+    src = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    assert "research-os-home" in src, "the installer does not write the pointer file"
+    # And the flag has to win over a stale export.
+    assert 'STATE_HOME="$HERMES_HOME/research-os"' in src
+    assert "STATE_HOME=\"${RESEARCH_OS_HOME:-" not in src
+
+
+def test_the_tool_description_lists_every_phase():
+    ROOT = Path(__file__).resolve().parents[1]
+    """The agent reads the tool description before it writes anything, and
+    it decides which phase to set from that text.
+
+    The diverging phase existed in the code for a release and was not in
+    the description, so an agent that wanted to step outside the frame
+    had no way to name the step. A list that is written by hand drifts
+    from the list the code has, and nothing catches it.
+
+    So the description has to name every phase the code defines, and a
+    phase that is added without being described fails here.
+    """
+    src = (ROOT / "research_os" / "__init__.py").read_text()
+    i = src.find("'phase' (")
+    assert i > 0, "the phase list is not in the tool description"
+    seg = src[i: src.find(")", i)]
+    listed = set(re.findall(r"[a-z]+", seg))
+    for phase in protocol.PHASES:
+        assert phase in listed, "%s is not in the tool description" % phase
+
+
+def test_the_tool_description_does_not_presume_one_genre():
+    ROOT = Path(__file__).resolve().parents[1]
+    """The tool description is read on every research turn, so a phrase
+    that names a research genre is a phrase that every research turn
+    reads."""
+    src = (ROOT / "research_os" / "__init__.py").read_text()
+    i = src.find('"description":')
+    seg = src[i: i + 6000]
+    # Word boundaries, not substrings: "lab" is inside "label".
+    for word in (r"scientific question", r"\blab\b", r"\bbench\b", r"\bcohorts?\b",
+                 r"\bmice\b", r"\bdepression\b", r"\bdysbiosis\b", r"\bgut\b",
+                 r"\bbrain\b", r"\bmicrobiome\b", r"\bplacebo\b"):
+        hit = re.search(word, seg, re.I)
+        assert not hit, "%s is in the tool description" % hit.group(0) if hit else ""
 
 
 def test_no_rule_carries_one_researcher_topic():

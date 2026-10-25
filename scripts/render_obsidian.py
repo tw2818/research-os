@@ -169,7 +169,7 @@ def _notes_dir(cfg: dict) -> Path:
     configured = str(cfg.get("notes_dir") or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path(getattr(state, "HOME", Path.home() / ".hermes" / "research-os")) / NOTES_DIRNAME
+    return state.home() / NOTES_DIRNAME
 
 
 def _w(path: Path, text: str) -> None:

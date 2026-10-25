@@ -19,6 +19,7 @@ never to "a stalled agent".
 
 from __future__ import annotations
 
+import re
 import json
 import sys
 import traceback
@@ -178,7 +179,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "on", "off", "status", "list", "create", "switch",
                     "contradict", "question", "hypothesis", "map",
                     "set_state", "review",
-                    "delete", "claim", "validate", "repair",
+                    "delete", "claim", "amend", "validate", "repair",
                 ],
                 "description": "What to do.",
             },
@@ -260,6 +261,32 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "For action 'set_state': what is being worked on right now. The "
                     "narrowest of the three levels - and the one that most easily "
                     "drifts away from the core question without anyone noticing."
+                ),
+            },
+            "claim_id": {
+                "type": "string",
+                "description": (
+                    "For action 'amend': the id of the row to revise, e.g. 'L44'. "
+                    "The row keeps its id when amended, so every other row that "
+                    "cites it still points at the right thing."
+                ),
+            },
+            "strength": {
+                "type": "string",
+                "description": (
+                    "For action 'amend': the corrected strength of the row."
+                ),
+            },
+            "kind": {
+                "type": "string",
+                "description": (
+                    "For action 'amend': the corrected kind of the row."
+                ),
+            },
+            "note": {
+                "type": "string",
+                "description": (
+                    "For action 'amend': a note on what changed and why."
                 ),
             },
             "narrative": {
@@ -613,13 +640,33 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     if existing is not None:
                         duplicates.append(existing.get("id"))
                         continue
-                    recorded.append(_state.append_claim(project, one))
-                return ok({
+                    # One bad row must not eat the rest. The first version
+                    # of this loop had no guard, so a single inference with
+                    # a missing inference_type raised and every row after
+                    # it was silently dropped - the batch reported fewer
+                    # rows than it was given and said nothing about why.
+                    try:
+                        recorded.append(_state.append_claim(project, one))
+                    except Exception as exc:
+                        rejected.append({
+                            "claim": {
+                                "content": one.get("content"),
+                                "kind": one.get("kind"),
+                            },
+                            "why": str(exc),
+                        })
+                msg = {
                     "recorded": recorded,
                     "duplicates": duplicates,
                     "rejected": rejected,
                     "count": len(recorded),
-                })
+                }
+                if rejected:
+                    msg["note"] = (
+                        f"{len(rejected)} 条没进去，原因在 rejected 里。"
+                        "其余的已经记好了——改完再补记那几条就行。"
+                    )
+                return ok(msg)
             claim = dict(args.get("claim") or {})
             if not claim.get("content"):
                 return fail("claim.content is required")
@@ -640,6 +687,47 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 })
             row = _state.append_claim(project, claim)
             return ok({"recorded": row})
+
+        if action == "amend":
+            if not project:
+                return fail("project is required")
+            claim_id = str(args.get("claim_id") or "").strip()
+            if not claim_id:
+                return fail(
+                    "claim_id is required: the id of the row to amend, e.g. L44"
+                )
+            patch = {
+                k: args.get(k)
+                for k in ("content", "strength", "kind", "source", "status", "note")
+                if args.get(k) is not None
+            }
+            if not patch:
+                return fail(
+                    "give at least one of: content, strength, kind, source, "
+                    "status, note - what is being changed"
+                )
+            before = _state.read_claims(project)
+            old_row = next(
+                (c for c in before if str(c.get("id") or "") == claim_id), None
+            )
+            if old_row is None:
+                return fail(f"no such claim: {claim_id}")
+            try:
+                amended = _state.amend_claim(project, claim_id, **patch)
+            except ValueError as exc:
+                return fail(str(exc))
+            return ok({
+                "amended": amended,
+                "previous": {
+                    k: old_row.get(k)
+                    for k in ("content", "strength", "kind", "source", "status")
+                    if old_row.get(k) is not None
+                },
+                "note": (
+                    "同一行的内容改了，id 没变——别的断言指向它的引用仍然有效。"
+                    "改动留了痕，在 amended_from 里。"
+                ),
+            })
 
         if action == "contradict":
             # The competing explanations and what separates them. Without it
@@ -1358,13 +1446,24 @@ def _calls_state_writer(text: str) -> bool:
     calls something that writes. Importing the module to read it is
     allowed - reading the state is how the agent finds out what is
     already recorded.
+
+    A call has to look like a call. A grep for a writer's name in a
+    source file is not a write, and the first version of this check
+    fired on it - which blocked a command that was only looking.
     """
     if not text:
         return False
     low = text.lower()
     if not any(h in low for h in _STATE_IMPORT_HINTS):
         return False
-    return any(call in text for call in _STATE_WRITE_CALLS)
+    for call in _STATE_WRITE_CALLS:
+        # "S.append_claim(" or "state.append_claim(" - a call, not a
+        # mention inside a search pattern.
+        for m in re.finditer(re.escape(call), text):
+            tail = text[m.end(): m.end() + 40]
+            if tail.lstrip().startswith("("):
+                return True
+    return False
 
 
 def _mentions_state_tree(text: str) -> bool:

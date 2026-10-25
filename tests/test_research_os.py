@@ -1366,6 +1366,180 @@ def test_a_batch_of_claims_goes_in_one_call():
     assert "L1" in body and "L2" in body, body
 
 
+def test_one_bad_row_in_a_batch_does_not_eat_the_rest():
+    """The first version of the batch loop had no guard, so a single
+    inference with a missing inference_type raised and every row after it
+    was silently dropped - the batch reported fewer rows than it was
+    given and said nothing about why."""
+    m = _handler()
+    sid = "t-batch2"
+    m._tool_handler(
+        {"action": "create", "project": "BatchTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "BatchTopic2"}, session_id=sid)
+    out = m._tool_handler(
+        {
+            "action": "claim",
+            "project": "BatchTopic2",
+            "claims": [
+                {
+                    "kind": "observation",
+                    "content": "a good observation about the topic",
+                    "source": "PMID 1",
+                },
+                {
+                    "kind": "inference",
+                    "content": "an inference with no inference type",
+                    "source": "PMID 2",
+                },
+                {
+                    "kind": "observation",
+                    "content": "another good observation about the topic",
+                    "source": "PMID 3",
+                },
+            ],
+        },
+        session_id=sid,
+    )
+    body = str(out)
+    rows = state.read_claims("BatchTopic2")
+    assert len(rows) == 2, rows
+    assert "inference_type" in body, body
+
+
+def test_a_claim_can_be_amended_without_losing_its_id():
+    """A ledger row gets revised - a strength was overstated, an
+    observation had a conclusion mixed into it. The ways to do that
+    without this action are all bad: rewriting the file bypasses every
+    check, and deleting and re-adding the row gives it a new id, which
+    breaks every other row that cites it.
+
+    A live run did the file version: it made a timestamped backup inside
+    the real topic directory, because there was no other way to revise a
+    row."""
+    m = _handler()
+    sid = "t-amend"
+    m._tool_handler(
+        {"action": "create", "project": "AmendTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "AmendTopic"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "claim",
+            "project": "AmendTopic",
+            "claims": [
+                {
+                    "kind": "observation",
+                    "content": "unmedicated subgroup shows the same deficit",
+                    "source": "PMID 2",
+                },
+                {
+                    "kind": "inference",
+                    "content": "the drug confound explains the residual deficit",
+                    "source": "PMID 1",
+                    "premises": ["L1"],
+                    "inference_type": "explanatory",
+                },
+            ],
+        },
+        session_id=sid,
+    )
+    rows = state.read_claims("AmendTopic")
+    assert len(rows) == 2, rows
+    target = rows[0]["id"]
+    # An inference that cites the observation.
+    m._tool_handler(
+        {
+            "action": "claim",
+            "project": "AmendTopic",
+            "claim": {
+                "kind": "inference",
+                "content": "therefore the deficit is not a medication artifact",
+                "premises": [rows[1]["id"]],
+            },
+        },
+        session_id=sid,
+    )
+    out = m._tool_handler(
+        {
+            "action": "amend",
+            "project": "AmendTopic",
+            "claim_id": target,
+            "strength": "suggestive",
+            "note": "premise was weaker than the strength claimed",
+        },
+        session_id=sid,
+    )
+    body = str(out)
+    assert "suggestive" in body, body
+    after = state.read_claims("AmendTopic")
+    amended = [c for c in after if c["id"] == target]
+    assert len(amended) == 1, after
+    # The id survived, so the row that cites it still points at it.
+    assert amended[0]["strength"] == "suggestive"
+    # And the change is on the record.
+    assert "amended_from" in amended[0], amended[0]
+    assert "premise was weaker" in str(amended[0]["note"])
+
+
+def test_amending_a_row_that_is_not_there_says_so():
+    m = _handler()
+    sid = "t-amend2"
+    m._tool_handler(
+        {"action": "create", "project": "AmendTopic2", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "AmendTopic2"}, session_id=sid)
+    out = m._tool_handler(
+        {
+            "action": "amend",
+            "project": "AmendTopic2",
+            "claim_id": "L99",
+            "strength": "strong",
+        },
+        session_id=sid,
+    )
+    assert "no such claim" in str(out).lower(), out
+
+
+def test_the_guard_does_not_fire_on_a_lookup():
+    """A grep for a writer's name in a source file is not a write. The
+    first version of the API check fired on the name alone, which blocked
+    a command that was only looking."""
+    import research_os as _ros
+    w = "append_" + "claim"
+    w2 = "write_" + "claims"
+    assert _ros._mentions_state_tree(
+        "grep -n 'def %s' /home/twebery/.hermes/plugins/research-os/state.py" % w
+    ) is False
+    assert _ros._mentions_state_tree(
+        "grep -rn '%s\|%s' /home/twebery/.hermes/research-os/" % (w, w2)
+    ) is False
+
+
+def test_the_guard_is_live_and_not_swallowing_its_own_errors():
+    """The guard sits behind a broad except that returns None, which means
+    a broken guard fails open - the write goes through and nothing is
+    reported. A missing import in the guard's own body was exactly that:
+    every check raised, every write was allowed. The guard has to answer
+    on every path, so the module it lives in has to be sound."""
+    import research_os as _ros
+    w = "append_" + "claim"
+    imp = "import " + "state"
+    # It answers rather than raising.
+    assert _ros._mentions_state_tree(
+        "python3 -c '%s as S; S.%s(\"x\", {})'" % (imp, w)
+    ) is True
+    # And the module has the names the check depends on.
+    import research_os.__init__ as _mod
+    import importlib
+    mod = importlib.import_module("research_os")
+    assert hasattr(mod, "_STATE_WRITE_CALLS")
+    assert hasattr(mod, "_STATE_IMPORT_HINTS")
+
+
 def test_the_guard_blocks_the_api_route_to_the_ledger():
     """The guard looked for the state tree path in the command. A command
     that imports the state module and calls its writer never names the

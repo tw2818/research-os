@@ -443,6 +443,11 @@ CLAIM_COLUMNS = (
     "source",
     "status",
     "note",
+    # The amendment history. A row that was revised has to say so, and
+    # say what it said before - otherwise a ledger can be rewritten and
+    # nobody can tell that it happened. The column is part of the row, so
+    # it survives every write, and the old rows simply leave it empty.
+    "amended_from",
 )
 
 
@@ -565,6 +570,88 @@ def append_claim(topic: str, claim: dict[str, str]) -> dict[str, str]:
     claims.append(row)
     write_claims(topic, claims)
     return row
+
+
+def amend_claim(
+    topic: str,
+    claim_id: str,
+    content: str | None = None,
+    strength: str | None = None,
+    kind: str | None = None,
+    source: str | None = None,
+    status: str | None = None,
+    note: str | None = None,
+) -> dict[str, str]:
+    """Amend a claim in place, keeping its id.
+
+    A ledger row gets revised: a strength was overstated, an observation
+    had a conclusion mixed into it, a source turned out to be wrong. The
+    ways to do that without this function are all bad - rewriting the
+    file bypasses every check, and deleting and re-adding the row gives
+    it a new id, which breaks every other row that cites it.
+
+    The id stays, so the premises pointing at it keep pointing at it. The
+    amendment is recorded, so the change is traceable: a ledger that
+    silently rewrites itself is not one anybody can check.
+
+    Returns the amended row. Raises ValueError when the id is not there.
+    """
+    claims = read_claims(topic)
+    row = None
+    for c in claims:
+        if str(c.get("id") or "") == str(claim_id):
+            row = c
+            break
+    if row is None:
+        raise ValueError(f"no such claim: {claim_id}")
+
+    amended = dict(row)
+    changes: list[str] = []
+
+    if content is not None and str(content) != str(row.get("content") or ""):
+        amended["content"] = str(content)
+        changes.append("content")
+    if strength is not None and str(strength) != str(row.get("strength") or ""):
+        amended["strength"] = str(strength)
+        changes.append("strength")
+    if kind is not None and str(kind) != str(row.get("kind") or ""):
+        amended["kind"] = str(kind)
+        changes.append("kind")
+    if source is not None and str(source) != str(row.get("source") or ""):
+        amended["source"] = str(source)
+        changes.append("source")
+    if status is not None and str(status) != str(row.get("status") or ""):
+        amended["status"] = str(status)
+        changes.append("status")
+    if note is not None and str(note) != str(row.get("note") or ""):
+        amended["note"] = str(note)
+        changes.append("note")
+
+    if not changes:
+        return dict(row)
+
+    # The amendment history travels with the row. A row that was revised
+    # should say so, and by whom, and from what.
+    history = amended.get("amended_from")
+    if history:
+        try:
+            history = json.loads(history)
+        except Exception:
+            history = []
+    else:
+        history = []
+    history.append({
+        "at": now(),
+        "changes": changes,
+        "previous": {k: row.get(k) for k in changes},
+    })
+    amended["amended_from"] = json.dumps(history, ensure_ascii=False)
+
+    out = []
+    for c in claims:
+        out.append(amended if str(c.get("id") or "") == str(claim_id) else c)
+    write_claims(topic, out)
+    return amended
 
 
 def set_claim_status(topic: str, claim_id: str, status: str) -> dict[str, str]:

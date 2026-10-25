@@ -66,8 +66,15 @@ python3 "$SRC/scripts/osctl.py" init ${VAULT:+--vault "$VAULT"} >/dev/null
 mkdir -p "$STATE_HOME/bin"
 cp "$SRC/scripts/osctl.py" "$STATE_HOME/bin/osctl.py"
 cp "$SRC/scripts/render_obsidian.py" "$STATE_HOME/bin/render_obsidian.py"
-for _mod in state validate audit classify protocol; do
-  cp "$SRC/research_os/$_mod.py" "$STATE_HOME/bin/"
+# Every module in the package, not a hand-written list. A module that
+# the CLI imports but the installer did not copy is an import error
+# that only appears on someone else's machine.
+#
+# `__init__.py` is left out - it would turn the directory into a package
+# and break the flat imports the CLI falls back to.
+for _mod in "$SRC"/research_os/*.py; do
+  [ "$(basename "$_mod")" = "__init__.py" ] && continue
+  cp "$_mod" "$STATE_HOME/bin/"
 done
 find "$STATE_HOME/bin" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 

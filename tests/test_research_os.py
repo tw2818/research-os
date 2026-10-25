@@ -1864,6 +1864,63 @@ def test_research_block_truncation_keeps_claim_instruction():
     assert "claim" in block
 
 
+def test_a_topic_whose_directory_is_gone_does_not_haunt_the_name():
+    """A registry entry whose directory is gone is an orphan. It stays in
+    the list, because `on` and `repair` find it there and rebuild it -
+    that is what they are for. But the name is free: an orphan is a state
+    to repair, not a name to squat on. Refusing the name meant that once
+    a topic directory was removed by anything other than delete_topic,
+    the name could never be used again."""
+    _fresh_topic("T-ghost", "the real question")
+    assert "T-ghost" in [t["name"] for t in state.list_topics()]
+    # Remove the directory behind the registry's back.
+    import shutil
+    shutil.rmtree(state.topic_dir("T-ghost"), ignore_errors=True)
+    # The orphan is still visible, so it can be repaired.
+    assert "T-ghost" in [t["name"] for t in state.list_topics()]
+    # And the name is free again.
+    state.create_topic("T-ghost", "a new question")
+    assert state.topic_dir("T-ghost").is_dir()
+    assert "T-ghost" in [t["name"] for t in state.list_topics()]
+
+
+def test_the_block_keeps_the_standing_when_the_question_is_long():
+    """A real topic has a long core question, and the question used to
+    crowd out the standing: the narrative, the plan, the phase and the
+    tool call all fell off the end. The block that survived had the
+    evidence and lost the memory of what the project had concluded."""
+    _fresh_topic("T-long", "Q" * 3000)
+    m = state.read_map("T-long")
+    m["narrative"] = "现在认为 A 路径主导，因为 B"
+    m["plan"] = "下一步查 C"
+    m["phase"] = "weighing"
+    m["current_task"] = "compare the two explanations"
+    state.write_map("T-long", m)
+    block = protocol.build_research_block("T-long", {"max_inject_chars": 1600})
+    assert "现在认为 A 路径主导" in block, block[:2000]
+    assert "下一步查 C" in block, block[:2000]
+    assert "当前阶段" in block
+    assert "这轮不要做" in block
+    assert "research_mode(action='claim'" in block
+    assert "给竞争解释" in block
+
+
+def test_the_situation_gives_up_room_before_the_standing():
+    """The situation lines - the competing explanations, the evidence that
+    separates them, the open questions - are four long lines, and they
+    are in the topic file anyway. They are the first thing to go."""
+    _fresh_topic("T-crowd", "核心问题：" + "很长的描述" * 30)
+    m = state.read_map("T-crowd")
+    m["goal"] = "g" * 60
+    m["current_task"] = "t" * 60
+    m["phase"] = "weighing"
+    state.write_map("T-crowd", m)
+    block = protocol.build_research_block("T-crowd", {"max_inject_chars": 1000})
+    assert "当前阶段" in block
+    assert "research_mode(action='claim'" in block
+    assert len(block) <= 1000 + 200
+
+
 def test_research_block_truncation_keeps_the_thinking_whole():
     """A half-list of moves is worse than no list. The thinking rules are
     cut as a block, never mid-rule."""

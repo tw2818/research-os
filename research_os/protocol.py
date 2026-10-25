@@ -419,11 +419,44 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
     lines.append(f"（以上仅属于 {topic} 课题，不要套用到别的话题。）")
 
     block = "\n".join(lines)
-    cap = int((config or {}).get("max_inject_chars", 900))
+    # The fallback matches the shipped default. It used to be 900, which
+    # is the old budget - and a config that failed to load would have
+    # quietly cut the block to half its size, losing the standing and the
+    # phase along with it. A cap that shrinks on error is a cap that
+    # removes the thing it was protecting.
+    cap = int((config or {}).get("max_inject_chars", 1600))
     if len(block) > cap:
         block = _truncate(block, cap)
     return block
 
+
+# The line prefixes that survive the cut.
+_KEEP_PREFIXES = (
+    '[Research OS',
+    '核心问题：',
+    '课题目标：',
+    '当前阶段：',
+    '当前任务：',
+    '当前判断（课题叙事）：',
+    '下一步计划：',
+    '这轮要交出的东西：',
+    '这轮不要做：',
+    '对齐检查',
+    '  课题目标：',
+    '  核心问题：',
+    '  当前任务：',
+    '  当前判断（课题叙事）：',
+    '  下一步计划：',
+    '  若当前任务',
+    '当前最佳解释',
+    '候选解释',
+    '受质疑的解释',
+    '能分开它的证据',
+    '竞争解释：',
+    '待解问题：',
+    '如果用户这轮',
+    '（以上仅属于',
+)
 
 def _truncate(block: str, cap: int) -> str:
     """Cut the block to fit, keeping the parts that act rather than the parts
@@ -457,32 +490,111 @@ def _truncate(block: str, cap: int) -> str:
     # The standing and the alignment check come first: they are what the
     # turn is for, and the rules are how to work on it. Losing the standing
     # to keep a rule inverts the block.
+    # What survives the cut, in what order.
+    #
+    # The order is the standing first, because the standing is what the
+    # turn is for: the question, the goal, the phase, the task, what we
+    # currently believe, what happens next. The narrative and the plan
+    # are the two ends of the loop - a review that redirects writes them,
+    # and the next turn reads them back - so they outrank the situation
+    # lines, which are context the topic file already holds.
+    #
+    # A block that kept the evidence and lost the narrative had the
+    # standing of a project that did not know what it had concluded.
     priority = re.compile(
-        r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|对齐检查|"
-        r"  课题目标：|  核心问题：|  当前任务：|  若当前任务|"
-        r"当前最佳解释|候选解释|受质疑的解释|"
-        r"能分开它的证据|竞争解释：|待解问题：|如果用户这轮|（以上仅属于)"
+        r"^(" + "|".join(re.escape(x) for x in _KEEP_PREFIXES) + r")"
     )
+    # Two tiers. The first tier is what the turn is for - the standing,
+    # the rules, the tool call. The second tier is the situation: the
+    # competing explanations, the evidence that separates them, the open
+    # questions. The situation is real context, but it is also in the
+    # topic file, and it is long - four lines of it took more room than
+    # the rules and the tool call together.
+    #
+    # A block that kept the situation and lost the tool call was a
+    # research session that read well and recorded nothing.
+    keep_first = re.compile(
+        r"^(\[Research OS|核心问题：|课题目标：|当前阶段：|当前任务：|"
+        r"当前判断（课题叙事）：|下一步计划：|这轮要交出的东西：|这轮不要做：|"
+        r"如果用户这轮|（以上仅属于)"
+    )
+    keep_second = re.compile(
+        r"^(对齐检查|当前最佳解释|候选解释|受质疑的解释|"
+        r"能分开它的证据|竞争解释：|待解问题：)"
+    )
+
     kept: list[str] = []
     used = 0
-    for line in block.split("\n"):
+    lines = block.split("\n")
+    second: list[str] = []
+    for i, line in enumerate(lines):
         if any(line.startswith(b.split("\n")[0][:10]) for b in blocks):
             continue
-        if not priority.match(line):
+        tier2 = keep_second.match(line)
+        if not keep_first.match(line) and not tier2:
             continue
         line = clip(line)
+        cost = len(line) + 1
+        if tier2:
+            second.append(line)
+            continue
+        if used + cost > cap:
+            continue
+        kept.append(line)
+        used += cost
+        # The phase thinking is the line right under "当前阶段：". Without
+        # it the phase is a label with nothing under it, and the thinking
+        # the phase exists to install never reaches the agent.
+        if line.startswith("当前阶段："):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if nxt and nxt.strip() and not keep_first.match(nxt) and not keep_second.match(nxt):
+                nxt = clip(nxt)
+                cost2 = len(nxt) + 1
+                if used + cost2 <= cap:
+                    kept.append(nxt)
+                    used += cost2
+
+    # The rules go in as whole blocks. A half-list of moves is worse than
+    # no list: the agent reads the heading of a set and none of the set.
+    # So they are never cut - they are either in or not.
+    #
+    # The tool call line is the fallback. TURN_DEMAND ends with the same
+    # instruction, so when the rules fit the line is redundant, and when
+    # they do not fit, the line is what keeps the ledger alive. It is
+    # shorter than either rule block, which is why it can be the one
+    # that fits.
+    tool_cost = len(tool_line) + 1
+    rules_cost = sum(len(b) + 1 for b in blocks)
+
+    if used + rules_cost <= cap:
+        for b in blocks:
+            kept.append(b)
+            used += len(b) + 1
+    elif used + tool_cost <= cap:
+        kept.append(tool_line)
+        used += tool_cost
+    else:
+        # Not even the tool call fits. Give up the longest standing lines
+        # first - they are the most compressible, and a compressed
+        # question still says what the project is about.
+        for ln in sorted(kept, key=len, reverse=True):
+            if used + tool_cost <= cap:
+                break
+            kept.remove(ln)
+            used -= len(ln) + 1
+        if used + tool_cost <= cap:
+            kept.append(tool_line)
+            used += tool_cost
+
+    # The situation takes what is left. It is context, and it is in the
+    # topic file, so it is the first thing to go when the block is tight.
+    for line in second:
         cost = len(line) + 1
         if used + cost > cap:
             continue
         kept.append(line)
         used += cost
 
-    for b in blocks:
-        cost = len(b) + 1
-        if used + cost > cap:
-            continue
-        kept.append(b)
-        used += cost
     if not kept:
         kept.append(clip(blocks[0]))
     else:

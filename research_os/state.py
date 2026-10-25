@@ -119,6 +119,10 @@ def topic_dir(topic: str) -> Path:
 def list_topics() -> list[dict[str, Any]]:
     """Registry first; fall back to disk so a hand-created dir is still visible."""
     registry = _read_json(PROJECTS_PATH, {})
+    # The registry is trusted here, including entries whose directory is
+    # gone. Those are orphans, and they are load-bearing: `on` and
+    # `repair` find them through this list and rebuild them. Filtering
+    # them out would hide the very thing those two actions exist for.
     known: dict[str, dict[str, Any]] = dict(registry.get("topics", {}))
     if TOPICS_DIR.is_dir():
         for d in sorted(TOPICS_DIR.iterdir()):
@@ -147,7 +151,12 @@ def create_topic(
         )
     if not core_question.strip():
         raise ValueError("core_question is required: a topic without a question is not a research topic")
-    if topic_exists(topic):
+    # A name whose directory is gone is free. An orphan - a registry entry
+    # with no directory - is a state to repair, not a name to squat on:
+    # refusing to create it meant that once a topic directory was removed
+    # by anything other than delete_topic, the name could never be used
+    # again.
+    if (TOPICS_DIR / topic).is_dir():
         raise ValueError(f"topic already exists: {topic}")
 
     d = topic_dir(topic)

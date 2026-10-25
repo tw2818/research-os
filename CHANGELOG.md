@@ -54,6 +54,43 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.6.1] — 2026-10-25
+
+- **The counters could not see the work the loop is built on.** One live
+  turn of research work recorded six claims in two batch calls and the
+  session file said `ledger: 0`; the same turn read three pages and was
+  counted as one search; and a `web_search` issued from inside
+  `execute_code` was judged to be an unknown session and blocked, while the
+  identical call made directly by the agent went through. Three separate
+  blindings, and the review demand rides on all three numbers - so a turn
+  could do its searching somewhere the counter cannot see and write its
+  findings in the shape the counter does not recognise, and the loop would
+  report that nothing had happened.
+- **A batch write counts its rows.** `_is_claim_call` knew only the single
+  `claim` shape, while `claims=[...]` is the form the tool's own
+  description recommends for a round of searching: the more faithfully the
+  tool was used, the less the loop could see. `_claim_rows` counts both
+  shapes, and `note_tool_activity` takes a row count rather than a flag.
+- **`web_extract` is evidence.** It was already a literature search at the
+  guard (`SEARCH_TOOLS`) and absent from `EVIDENCE_TOOLS`, so the same tool
+  answered two different questions - blocked as a search when idle, and
+  invisible as a search once open.
+- **A composite session id resolves to its parent.** Tools called from
+  inside `execute_code`, or from a delegated child, arrive with
+  `<parent>:<child>:<turn>`, which names no session file. Read as unknown,
+  it made the guard see an idle conversation and refuse a search that
+  belonged to an open topic. The parent is taken first; the pointer is the
+  fallback only when the call named no session at all, because a named
+  conversation must not be filed under whichever one spoke last.
+- **A search from inside `execute_code` now reaches the counter.** The
+  sandbox bridge calls its tools with no session and no turn, and the host
+  suppresses `post_tool_call` inside the executor that owns the outer call,
+  so everything done inside `execute_code` was invisible to the counters —
+  which is how a turn can read six sources there and be judged as having
+  read nothing. The pre hook does fire, so an allowed nested search is
+  counted at that point: after the block checks, because a refused search
+  is not work.
+
 ## [0.6.0] — 2026-10-25
 
 Note on the versions before this one: `plugin.yaml` was bumped to 0.4.0 and

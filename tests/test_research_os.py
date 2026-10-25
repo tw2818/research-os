@@ -2949,5 +2949,174 @@ def test_entering_a_topic_refuses_when_no_session_is_known():
     assert "无法确定当前会话" in payload["error"]
 
 
+# --------------------------------------------------------------------------
+# the counters the review rides on
+#
+# Three gaps here were found by reading one live turn of research work against
+# the session file it wrote: a batch claim write counted as nothing, a page
+# read counted as no evidence, and a tool call made from inside execute_code
+# was judged to be an unknown session. Each one is a way for a productive turn
+# to look empty to the loop that decides whether a review is due.
+# --------------------------------------------------------------------------
+
+
+def test_a_batch_claim_write_counts_every_row():
+    """The batch is the form the tool's own description recommends.
+
+    A live turn recorded six findings in two batch calls and the session file
+    said ledger=0, because the counter only knew the single-claim shape. The
+    review demand rides on that number, so the more faithfully the tool was
+    used the less the loop could see.
+    """
+    m = _handler()
+    sid = "t-batch-claim"
+    m._post_tool_call(
+        tool_name="research_mode",
+        args={
+            "action": "claim",
+            "claims": [{"content": "a"}, {"content": "b"}, {"content": "c"}],
+        },
+        session_id=sid,
+        turn_id="t1",
+    )
+    assert state.turn_activity(sid, "t1")["ledger"] == 3
+
+
+def test_a_batch_row_without_content_is_not_counted():
+    m = _handler()
+    sid = "t-batch-empty"
+    m._post_tool_call(
+        tool_name="research_mode",
+        args={"action": "claim", "claims": [{"content": "a"}, {}, {"content": "  "}]},
+        session_id=sid,
+        turn_id="t1",
+    )
+    assert state.turn_activity(sid, "t1")["ledger"] == 1
+
+
+def test_reading_a_page_counts_as_evidence():
+    """web_extract is a literature search at the guard, so it is evidence at
+    the counter. The two have to answer the same question about the same tool.
+    """
+    m = _handler()
+    sid = "t-evidence-extract"
+    m._post_tool_call(tool_name="web_search", session_id=sid, turn_id="t1")
+    m._post_tool_call(tool_name="web_extract", session_id=sid, turn_id="t1")
+    assert state.turn_activity(sid, "t1")["evidence"] == 2
+
+
+def test_a_call_from_a_sub_context_lands_on_the_conversation():
+    """execute_code calls its tools with a composite `<parent>:<child>` id.
+
+    No session file is named by that id, so the guard read the conversation as
+    idle and blocked a search that belonged to an open topic, while the same
+    call made directly by the agent went through.
+    """
+    m = _handler()
+    sid = "t-composite"
+    m._tool_handler(
+        {"action": "create", "project": "CompositeTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "CompositeTopic"}, session_id=sid)
+    out = m._pre_tool_call(
+        tool_name="web_search", session_id=f"{sid}:child:turn", turn_id="t1"
+    )
+    assert out is None, out
+    m._post_tool_call(
+        tool_name="web_search", session_id=f"{sid}:child:turn", turn_id="t1"
+    )
+    assert state.turn_activity(sid, "t1")["evidence"] == 1
+
+
+def test_a_composite_id_is_not_attributed_to_another_conversation():
+    """The parent is used, and the pointer is the fallback — not the answer.
+
+    Two conversations can be open, and the pointer holds whichever one spoke
+    last. A call that names its own parent must not be filed under it.
+    """
+    m = _handler()
+    a, b = "t-bleed-a", "t-bleed-b"
+    m._pre_llm_call(session_id=a, user_message="研究一下", turn_id="t1")
+    m._pre_llm_call(session_id=b, user_message="研究一下", turn_id="t1")
+    m._post_tool_call(
+        tool_name="web_search", session_id=f"{a}:child:x", turn_id="t1"
+    )
+    assert state.turn_activity(a, "t1")["evidence"] == 1
+    assert state.turn_activity(b, "t1")["evidence"] == 0
+
+
+def test_an_unidentified_caller_falls_back_to_the_pointer():
+    m = _handler()
+    sid = "t-pointer-attr"
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    m._post_tool_call(tool_name="web_search", session_id="unknown", turn_id="t1")
+    assert state.turn_activity(sid, "t1")["evidence"] == 1
+
+
+def test_a_search_from_inside_execute_code_is_counted_at_the_pre_hook():
+    """The sandbox bridge calls its tools with no session and no turn, and the
+    host suppresses post_tool_call inside the executor that owns the outer
+    call - so post never sees them. The pre hook does fire, and an allowed
+    nested search has to reach the counter the review demand rides on.
+    """
+    m = _handler()
+    sid = "t-nested-search"
+    m._tool_handler(
+        {"action": "create", "project": "NestedTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "NestedTopic"}, session_id=sid)
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    out = m._pre_tool_call(tool_name="web_search", session_id=None, turn_id=None)
+    assert out is None, out
+    assert state.turn_activity(sid, "")["evidence"] == 1
+    assert state.topic_search_count("NestedTopic") == 1
+
+
+def test_a_blocked_nested_search_is_not_counted():
+    """A refused search is not work: the token is spent on the attempt that
+    was let through, not on the one the guard turned back."""
+    m = _handler()
+    sid = "t-nested-blocked"
+    m._tool_handler(
+        {"action": "create", "project": "NestedPaused", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "NestedPaused"}, session_id=sid)
+    m._tool_handler(
+        {
+            "action": "review",
+            "project": "NestedPaused",
+            "verdict": "pause",
+            "review_note": "偏离核心问题",
+        },
+        session_id=sid,
+    )
+    m._pre_llm_call(session_id=sid, user_message="研究一下", turn_id="t1")
+    out = m._pre_tool_call(tool_name="web_search", session_id=None, turn_id=None)
+    assert out is not None and out.get("action") == "block"
+    assert state.topic_search_count("NestedPaused") == 0
+
+
+def test_a_long_turn_keeps_the_pointer_fresh():
+    """The pointer is bounded by age, and a research turn outlives the bound.
+
+    Written once at the start of the turn, it expired twenty minutes into the
+    work, and every nested call after that was unresolvable — a search from
+    inside execute_code was blocked in an open topic. Any hook handed a real
+    session id rewrites it.
+    """
+    m = _handler()
+    sid = "t-fresh-pointer"
+    # Pretend the turn started long enough ago that the pointer is stale.
+    path = state.home() / state.ACTIVE_SESSION_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_id": sid, "ts": 0.0}), encoding="utf-8")
+    assert state.active_session() is None
+    m._pre_tool_call(tool_name="read_file", session_id=sid, turn_id="t1")
+    assert state.active_session() == sid
+
+
 if __name__ == "__main__":
     raise SystemExit(_run_all())

@@ -1327,7 +1327,7 @@ def note_tool_activity(
     turn_id: str,
     tool_name: str,
     is_evidence: bool,
-    is_ledger: bool,
+    is_ledger: bool | int,
     is_move: bool = False,
 ) -> None:
     s = read_session(session_id)
@@ -1341,8 +1341,12 @@ def note_tool_activity(
         turns[key] = activity
     if is_evidence:
         activity["evidence"] = int(activity.get("evidence") or 0) + 1
+    # The ledger counter takes a count as well as a flag: a batch write
+    # records several rows in one call, and counting the call rather than
+    # the rows made the recommended batch form read as an empty ledger.
     if is_ledger:
-        activity["ledger"] = int(activity.get("ledger") or 0) + 1
+        rows = 1 if is_ledger is True else int(is_ledger)
+        activity["ledger"] = int(activity.get("ledger") or 0) + max(1, rows)
     # A research move is a write that moves the question forward, as opposed
     # to a write that only records what was already known. It is the
     # difference between "the agent wrote down the ledger" and "the agent

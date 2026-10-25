@@ -2001,6 +2001,58 @@ def _convergence_check(
         return None
 
 
+def _resolve_session_id(raw: Any) -> str:
+    """Which session a tool call belongs to.
+
+    The hooks are handed the conversation's id, but two kinds of call arrive
+    without it. A call that comes through the tool bridge carries none, and a
+    call made from inside a sub-context — `execute_code`, a delegated child —
+    carries a composite `<parent>:<child>:<turn>` id that names no session
+    file, because only the parent has one.
+
+    Judging those ids as unknown made the search guard read a conversation
+    that was inside a topic as idle: a `web_search` issued from inside
+    `execute_code` was blocked in an open research session while the identical
+    call made directly by the agent went through. The counters missed those
+    searches for the same reason — nothing was attributed to the turn that
+    made them.
+
+    Resolution order: the parent of a composite id, then the id as given, then
+    the pointer a hook wrote — and the pointer only when the call named no
+    session at all. A caller that names a conversation gets that conversation
+    even before its session file exists, because falling back to the pointer
+    there would file one conversation's work under whichever one spoke last.
+    Empty when nothing usable was given, and the caller decides what an
+    unknown caller means.
+    """
+    given = str(raw or "").strip()
+    if given and given != "unknown":
+        if ":" in given:
+            parent = given.split(":", 1)[0]
+            if parent and parent != "unknown":
+                return parent
+        return given
+    pointer = _state.active_session()
+    if pointer and _state.session_path(pointer).exists():
+        return pointer
+    return ""
+
+
+def _note_seen_session(raw: Any, resolved: str) -> None:
+    """Keep the pointer fresh while a turn is running.
+
+    `pre_llm_call` writes the pointer once, at the start of the turn, and the
+    pointer is bounded by age on purpose. A research turn routinely runs
+    longer than that bound - the one that found this had been working for
+    twenty minutes - so after the bound expired every nested call became
+    unresolvable and a search from inside `execute_code` was blocked in an
+    open topic. Any hook that is handed a real session id can rewrite it.
+    """
+    given = str(raw or "").strip()
+    if given and given != "unknown" and resolved and resolved != "unknown":
+        _state.note_active_session(resolved)
+
+
 def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """Hold a literature search until the agent has a topic to put it in.
 
@@ -2012,10 +2064,14 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """
     try:
         tool_name = str(kwargs.get("tool_name") or "")
+        # Resolve and refresh before the search check: every top-level call
+        # carries the real session id, so any of them can keep the pointer
+        # inside its age bound — and a turn that runs long makes many.
+        session_id = _resolve_session_id(kwargs.get("session_id")) or "unknown"
+        _note_seen_session(kwargs.get("session_id"), session_id)
         if tool_name not in SEARCH_TOOLS:
             return None
 
-        session_id = str(kwargs.get("session_id") or "unknown")
         s = _state.read_session(session_id)
         if s.get("mode") == "research" and s.get("topic"):
             topic = str(s.get("topic") or "")
@@ -2047,7 +2103,28 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             # that was about to conclude - which is the opposite of what the
             # count is for.
             due = _review_due(topic)
-            return _convergence_check(session_id, topic, review_due=due)
+            out = _convergence_check(session_id, topic, review_due=due)
+            # A tool called from inside `execute_code` arrives through the
+            # sandbox bridge with no session and no turn, and it is handled
+            # inside the executor that owns the outer call — which suppresses
+            # post_tool_call so one turn does not report its work twice. So a
+            # page read inside execute_code is invisible to the counters that
+            # decide whether a review is due. The pre hook does fire, so an
+            # allowed nested search is counted here. It is counted after the
+            # block checks and only when nothing blocked it: a refused search
+            # is not work.
+            if out is None and not kwargs.get("session_id") and not kwargs.get("turn_id"):
+                if tool_name in _audit.EVIDENCE_TOOLS:
+                    _state.note_tool_activity(
+                        session_id,
+                        turn_id="",
+                        tool_name=tool_name,
+                        is_evidence=True,
+                        is_ledger=0,
+                    )
+                    _state.note_topic_search(topic, tool_name)
+                    _state.note_search_since_review(topic)
+            return out
 
         # pre_tool_call cannot see the user message or the conversation. The
         # turn's synthetic/not verdict was recorded by pre_llm_call, which runs
@@ -2088,14 +2165,16 @@ def _post_tool_call(**kwargs: Any) -> None:
     """
     try:
         tool_name = str(kwargs.get("tool_name") or "")
-        session_id = str(kwargs.get("session_id") or "unknown")
+        session_id = _resolve_session_id(kwargs.get("session_id")) or "unknown"
+        _note_seen_session(kwargs.get("session_id"), session_id)
         turn_id = str(kwargs.get("turn_id") or "")
         if not tool_name:
             return None
         # Only a claim write counts as recording. Creating a topic or opening
         # one is not the same act, and counting them would make a turn that
-        # never wrote a claim look accounted for.
-        is_ledger = tool_name == "research_mode" and _is_claim_call(kwargs.get("args"))
+        # never wrote a claim look accounted for. A batch write counts its
+        # rows, because the batch is the form the tool recommends.
+        claim_rows = _claim_rows(kwargs.get("args")) if tool_name == "research_mode" else 0
         # A research move is a write that changes what the topic knows, as
         # opposed to a write that adds a fact to the ledger. Recording a
         # report is a move only if it settles or shifts something. The
@@ -2108,7 +2187,7 @@ def _post_tool_call(**kwargs: Any) -> None:
             turn_id=turn_id,
             tool_name=tool_name,
             is_evidence=tool_name in _audit.EVIDENCE_TOOLS,
-            is_ledger=is_ledger,
+            is_ledger=claim_rows,
             is_move=is_move,
         )
         if tool_name in _audit.EVIDENCE_TOOLS:
@@ -2131,15 +2210,36 @@ def _post_tool_call(**kwargs: Any) -> None:
         return None
 
 
+def _claim_rows(args: Any) -> int:
+    """How many rows a research_mode call wrote to the ledger.
+
+    Two shapes exist and both are supported by the tool: one claim, and a
+    batch of them. The batch is the form the tool's own description
+    recommends for a round of searching, so a counter that only recognised
+    the single shape reported zero for the way the tool is meant to be used
+    — and the review demand rides on this counter, which means the more
+    faithfully the agent used the tool, the less the loop could see.
+    """
+    if not isinstance(args, dict):
+        return 0
+    if str(args.get("action") or "").lower() != "claim":
+        return 0
+    batch = args.get("claims")
+    if isinstance(batch, list):
+        return sum(
+            1
+            for one in batch
+            if isinstance(one, dict) and str(one.get("content") or "").strip()
+        )
+    claim = args.get("claim")
+    if isinstance(claim, dict) and str(claim.get("content") or "").strip():
+        return 1
+    return 0
+
+
 def _is_claim_call(args: Any) -> bool:
     """True when a research_mode call actually wrote a claim."""
-    if not isinstance(args, dict):
-        return False
-    action = str(args.get("action") or "").lower()
-    if action != "claim":
-        return False
-    claim = args.get("claim")
-    return isinstance(claim, dict) and bool(claim.get("content"))
+    return _claim_rows(args) > 0
 
 
 def _is_move_call(args: Any) -> bool:
@@ -2203,7 +2303,7 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         response = str(kwargs.get("response_text") or "")
         if not response.strip():
             return None
-        session_id = str(kwargs.get("session_id") or "unknown")
+        session_id = _resolve_session_id(kwargs.get("session_id")) or "unknown"
 
         s = _state.read_session(session_id)
         if s.get("mode") != "research":

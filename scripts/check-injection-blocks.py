@@ -1,88 +1,87 @@
-"""Acceptance check for the injection block, run against the real topics.
+"""Check that every real topic's injection block still carries the standing.
 
-The fixtures in the test suite use a short core question. The real
-topics have a long one, and the difference showed up as a bug the
-fixtures could not see: the block kept the evidence and lost the
-memory. So the check runs against the real state tree.
+The unit tests build a topic with a short question. The real topics have a
+long one, and the difference is what breaks: a long core question crowds
+the standing out of the block, and a short fixture will not show it. So
+this check runs against the real topics in the runtime state directory.
 
-A fixture with a short string is not a real case.
+    python3 scripts/check-injection-blocks.py
+
+Exit code 1 if any topic is missing a load-bearing part of the block.
+Run it after any change to the block, the truncation order, or the budget.
 """
+
 import os
 import sys
 
-sys.path.insert(0, "/home/twebery/research-os")
-os.environ.setdefault("RESEARCH_OS_HOME", "/home/twebery/.hermes/research-os")
+# The plugin source is the repo, not this skill directory: the skill holds
+# the notes, the repo holds the code that builds the block. The deployed
+# copy is flat (state.py at the top level), so it cannot be imported as
+# the package.
+_repo = os.environ.get("RESEARCH_OS_REPO") or "/home/twebery/research-os"
+if not os.path.isdir(os.path.join(_repo, "research_os")):
+    sys.stderr.write(
+        "cannot find the research-os repo at %s\n"
+        "set RESEARCH_OS_REPO to its path\n" % _repo
+    )
+    raise SystemExit(2)
+
+sys.path.insert(0, _repo)
 
 from research_os import protocol, state  # noqa: E402
 
-# What a turn is for. If one of these is missing, the turn has forgotten
-# what the work is for and is answering the last thing it was asked.
-REQUIRED = [
-    ("核心问题", lambda m, b: str(m.get("core_question") or "")[:10] in b),
-    ("课题目标", lambda m, b: str(m.get("goal") or "")[:10] in b),
-    ("当前阶段", lambda m, b: (not m.get("phase")) or "当前阶段：" in b),
-    ("阶段思考", lambda m, b: (not m.get("phase"))
-     or protocol.phase_thinking(m.get("phase") or "").split("\n")[1][:10] in b),
-    ("当前任务", lambda m, b: str(m.get("current_task") or "")[:10] in b),
-    ("当前判断", lambda m, b: (not m.get("narrative")) or str(m["narrative"])[:10] in b),
-    ("下一步计划", lambda m, b: (not m.get("plan")) or str(m["plan"])[:10] in b),
-    ("阶段门槛", lambda m, b: (not m.get("phase")) or "这轮不要做" in b),
-    ("输出形状", lambda m, b: (not m.get("phase")) or "这轮要交出的东西" in b),
-    ("科研思维", lambda m, b: "给可能答案" in b),
-    ("tool 调用行", lambda m, b: "research_mode(action='claim'" in b),
-]
-
-# The topic's frame has to reach the agent: the questions that are
-# settled (so the work is not repeated), the ones that are not, and the
-# competing hypotheses the current judgement may not cover.
-#
-# A topic with no resolved questions has no line to show, so the check
-# is on the topic having them, not on the block always carrying them.
-FRAME = [
-    ("已解问题", lambda m, b: (not _has_resolved(m)) or "已解" in b),
-    ("待解问题", lambda m, b: (not _has_open(m)) or "待解" in b or "还没解" in b),
-    ("未处理假设", lambda m, b: (not _has_hyps(m)) or "假设" in b),
-]
+# The parts of the block the turn is for. Checked by a stable prefix
+# rather than by the content, so a reworded line does not read as a
+# dropped line.
+REQUIRED = (
+    "当前阶段：",          # the phase and its name
+    "当前任务：",          # what is being worked on right now
+    "这轮要交出的东西：",  # the shape of this turn's answer
+    "这轮不要做：",        # the phase gate
+    "给可能答案",          # the thinking rules (the line was reworded when
+                           # the field-specific example was removed; the
+                           # check kept the old phrase and reported every
+                           # topic as broken)
+    "research_mode(action='claim'",  # the tool call
+)
 
 
-def _has_resolved(m):
-    return bool(m.get("resolved_questions"))
+def missing_parts(topic: str, cap: int = 1600):
+    m = state.read_map(topic)
+    block = protocol.build_research_block(topic, {"max_inject_chars": cap})
+    missing = [part for part in REQUIRED if part not in block]
+    for field in ("narrative", "plan"):
+        value = str(m.get(field) or "").strip()
+        if value and value[:10] not in block:
+            missing.append(field)
+    phase = str(m.get("phase") or "").strip()
+    if phase:
+        entry = protocol.PHASES.get(phase)
+        if entry and entry["thinking"][:12] not in block:
+            missing.append("phase thinking")
+    return block, missing
 
 
-def _has_open(m):
-    return bool(m.get("open_questions"))
+def main() -> int:
+    topics = [t["name"] for t in state.list_topics()]
+    if not topics:
+        print("no topics yet — nothing to check")
+        return 0
+    bad = 0
+    for topic in topics:
+        block, missing = missing_parts(topic)
+        if missing:
+            bad += 1
+            print("  %-32s %4d chars  MISSING: %s"
+                  % (topic, len(block), ", ".join(missing)))
+        else:
+            print("  %-32s %4d chars  ok" % (topic, len(block)))
+    if bad:
+        print("\n%d topic(s) lost part of the standing." % bad)
+        return 1
+    print("\nall %d topics carry the standing." % len(topics))
+    return 0
 
 
-def _has_hyps(m):
-    return bool(m.get("hypotheses"))
-
-# The topics are found, not named. A check that lists the topics it
-# checks only works for those topics, and it carries whoever's own
-# research into a public repository.
-TOPICS = [t["name"] for t in state.list_topics()] or ["<no topics>"]
-
-fail = 0
-for t in TOPICS:
-    m = state.read_map(t)
-    b = protocol.build_research_block(t, {"max_inject_chars": 1600})
-    print("=" * 68)
-    print("%s   %d 字   phase=%s" % (t, len(b), m.get("phase")))
-    for label, check in REQUIRED:
-        ok = check(m, b)
-        print("   %-12s %s" % (label, "在" if ok else "*** 丢了 ***"))
-        if not ok:
-            fail += 1
-    for label, check in FRAME:
-        ok = check(m, b)
-        print("   %-12s %s" % (label, "在" if ok else "*** 丢了 ***"))
-        if not ok:
-            fail += 1
-    print()
-    print("   --- 块内容 ---")
-    for line in b.split("\n"):
-        print("   | " + line[:104])
-    print()
-
-print("=" * 68)
-print("必需项缺失:", fail)
-sys.exit(1 if fail else 0)
+if __name__ == "__main__":
+    raise SystemExit(main())

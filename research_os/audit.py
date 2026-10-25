@@ -40,6 +40,11 @@ EVIDENCE_TOOLS = (
     "mcp__zotero__zotero_attachment_recognize_metadata",
     "mcp__zotero__zotero_item_create",
     "web_search",
+    # web_extract is a literature search at the guard (it is in SEARCH_TOOLS)
+    # and was not evidence at the counter. The asymmetry showed up in a live
+    # turn that read three pages and was counted as one search: the guard and
+    # the counter have to answer the same question about the same tool.
+    "web_extract",
 )
 
 def is_evidence_tool(tool_name: str) -> bool:

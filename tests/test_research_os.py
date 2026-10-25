@@ -1864,6 +1864,44 @@ def test_research_block_truncation_keeps_claim_instruction():
     assert "claim" in block
 
 
+def test_the_review_threshold_is_configurable():
+    """Eight searches is most of a small topic and nothing on a big one,
+    so the number has to be settable - globally in the config, and per
+    topic in the topic's own map."""
+    m = _handler()
+    sid = "t-thresh"
+    m._tool_handler(
+        {"action": "create", "project": "ThreshTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    # The default comes from the config.
+    every_searches, every_turns = state.review_thresholds("ThreshTopic")
+    assert every_searches >= 1 and every_turns >= 1
+    # A topic can set its own.
+    m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "ThreshTopic",
+            "review_every": {"searches": 3, "turns": 2},
+        },
+        session_id=sid,
+    )
+    s2, t2 = state.review_thresholds("ThreshTopic")
+    assert (s2, t2) == (3, 2), (s2, t2)
+    # And it says so rather than failing silently.
+    out = m._tool_handler(
+        {
+            "action": "set_state",
+            "project": "ThreshTopic",
+            "review_every": {"searches": 5},
+        },
+        session_id=sid,
+    )
+    assert "5" in str(out)
+    s3, _ = state.review_thresholds("ThreshTopic")
+    assert s3 == 5, s3
+
+
 def test_status_answers_about_the_topic_not_about_the_session():
     """`status` with a project means "what state is this topic in". It
     used to answer with the session's state, which is idle for any caller

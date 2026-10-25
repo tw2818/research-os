@@ -191,6 +191,15 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": "The scientific question this topic addresses. Required for create.",
             },
+            "review_every": {
+                "type": "object",
+                "description": (
+                    "How much work may pile up before a global review is "
+                    "demanded, for this topic: {'searches': n, 'turns': n}. "
+                    "A small topic wants a review sooner than a large one."
+                ),
+            },
+
             "hypotheses": {
                 "type": "string",
                 "description": (
@@ -833,13 +842,20 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
             task = args.get("current_task")
             narrative = args.get("narrative")
             plan = args.get("plan")
-            if all(x is None for x in (goal, phase, task, narrative, plan)):
+            every = args.get("review_every")
+            if every is not None and not isinstance(every, dict):
+                return fail("review_every must be an object")
+            if all(
+                x is None for x in (goal, phase, task, narrative, plan, every)
+            ):
                 return fail(
                     "give at least one of: goal (what this project is trying "
                     "to get at), phase (scoping/evidence/weighing/closing/"
                     "writing), current_task (what is being done right now), "
                     "narrative (what we currently believe and why it changed), "
-                    "plan (what happens next)"
+                    "plan (what happens next), review_every "
+                    "({'searches': n, 'turns': n} - how much work may pile "
+                    "up before a global review)"
                 )
             if phase is not None:
                 key = str(phase).strip()
@@ -856,6 +872,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                 current_task=task,
                 narrative=narrative,
                 plan=plan,
+                review_every=every,
             )
             # Updating the standing is what lifts a pause: the review said
             # the work had drifted, and the agent has now said where it is
@@ -874,6 +891,7 @@ def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
                     "current_task": m.get("current_task"),
                     "narrative": m.get("narrative"),
                     "plan": m.get("plan"),
+                    "review_every": m.get("review_every") or {},
                     "resumed": was_paused,
                 }
             )
@@ -1184,7 +1202,8 @@ def _review_due(topic: str) -> str | None:
             return None
         searches = int(review.get("searches_since_review") or 0)
         turns = int(review.get("turns_since_review") or 0)
-        if searches < 8 and turns < 6:
+        every_searches, every_turns = _state.review_thresholds(topic)
+        if searches < every_searches and turns < every_turns:
             return None
         m = _state.read_map(topic)
         narrative = str(m.get("narrative") or "").strip()
@@ -1273,7 +1292,8 @@ def _cycle_check(topic: str, activity: dict[str, Any]) -> str | None:
         if not review.get("paused"):
             searches = int(review.get("searches_since_review") or 0)
             turns = int(review.get("turns_since_review") or 0)
-            if searches >= 8 or turns >= 6:
+            every_searches, every_turns = _state.review_thresholds(topic)
+            if searches >= every_searches or turns >= every_turns:
                 lines.append(
                     f"这个课题已经积累了 {searches} 次检索、{turns} 轮工作，"
                     f"该做一次全局审查了："

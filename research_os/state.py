@@ -90,6 +90,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+# How much work can pile up before the agent has to look at the whole
+# project again. A small topic needs a review sooner than a large one:
+# eight searches is most of a small topic, and nothing on a big one.
+DEFAULT_REVIEW_EVERY = {
+    "searches": 8,
+    "turns": 6,
+}
+
+
+def review_thresholds(topic: str | None = None) -> tuple[int, int]:
+    """(searches, turns) that trigger a global review.
+
+    The config sets the default; a topic may override it in its own map,
+    because a topic with five claims and a topic with seventy are not
+    the same size and the same number of searches means something
+    different in each.
+    """
+    cfg = load_config()
+    searches = int(cfg.get("review_every_searches", DEFAULT_REVIEW_EVERY["searches"]) or 0)
+    turns = int(cfg.get("review_every_turns", DEFAULT_REVIEW_EVERY["turns"]) or 0)
+    if topic:
+        m = read_map(topic)
+        over = m.get("review_every") or {}
+        if isinstance(over, dict):
+            if over.get("searches"):
+                searches = int(over["searches"])
+            if over.get("turns"):
+                turns = int(over["turns"])
+    return max(1, searches), max(1, turns)
+
+
 def load_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(_read_json(CONFIG_PATH, {}))
@@ -263,6 +294,7 @@ def write_state(
     current_task: str | None = None,
     narrative: str | None = None,
     plan: str | None = None,
+    review_every: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Update the topic's standing, keeping the fields not being changed.
 
@@ -283,6 +315,15 @@ def write_state(
         m[MAP_NARRATIVE] = str(narrative).strip()
     if plan is not None:
         m[MAP_PLAN] = str(plan).strip()
+    if review_every is not None:
+        over = m.get("review_every") or {}
+        if not isinstance(over, dict):
+            over = {}
+        for k in ("searches", "turns"):
+            v = review_every.get(k)
+            if v:
+                over[k] = max(1, int(v))
+        m["review_every"] = over
     write_map(topic, m)
     return m
 

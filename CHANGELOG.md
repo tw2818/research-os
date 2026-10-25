@@ -7,6 +7,87 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-10-25
+
+The theme of this release: the agent kept doing the science and dropping
+the memory of it. Every fix below is a case where the work was fine and
+the record of the work was missing.
+
+### Added
+
+- **A way to revise a row without breaking the references.** `amend`
+  changes a claim's content, strength, kind, source or status in place.
+  The id stays, so every premise that cited it still points at the same
+  claim, and the old values are kept in a new `amended_from` column. The
+  agent used it to downgrade a claim from `strong` to `suggestive` after
+  finding that the original wording claimed more than the evidence
+  supported, and to rewrite the content rather than just the label.
+- **A batch entry for claims.** One search usually turns up several
+  findings, and one call per finding is a lot of round trips. `claims`
+  takes a list; each row goes through the same checks as a single claim,
+  and a row that fails validation is reported in `rejected` with its
+  reason instead of taking the rest of the batch down with it.
+- **A global review, on a condition, with teeth.** A topic is reviewed
+  after enough searches or turns accumulate, and the review decides
+  `continue`, `redirect` or `pause`. `pause` blocks further literature
+  searching until the standing is updated, so the decision is a control
+  rather than a suggestion.
+- **A standing that survives the turn.** The goal, the phase, the current
+  task, the narrative and the plan are read back at the start of every
+  turn. The narrative and the plan are the two ends of the loop: a review
+  that redirects writes them, and the next turn reads them back.
+- **A review interval that can be set.** `review_every_searches` and
+  `review_every_turns` in the config, and `review_every` in a topic's own
+  map. Eight searches is most of a small topic and nothing on a large one.
+- **A phase that changes the shape of the answer, not just its topic.**
+  `scoping`, `evidence`, `weighing`, `closing`, `writing`. Each phase
+  changes how the agent thinks and what it hands back, and each phase
+  says what it is not for.
+
+### Fixed
+
+- **The standing had no room on real topics.** Every real topic has a
+  long core question, and the question took the space: the narrative, the
+  plan, the phase instruction and the tool call all fell off the end of
+  the block, on all three topics. A block that survived had the evidence
+  and lost what the project had concluded. The standing comes first in
+  the cut now, and the situation lines give up the room - they are
+  context the topic file already holds.
+- **A cap that shrank on error.** The fallback budget was 900 while the
+  shipped default was 1600, so a config that failed to load would have
+  quietly cut the block in half, losing the standing and the phase with
+  it.
+- **A name could be taken forever.** A topic directory removed by
+  anything other than `delete` left an orphan in the registry, and the
+  orphan took the name hostage: creating a topic with that name was
+  refused, so the name could never be used again. The orphan stays in the
+  list, because `on` and `repair` find it there and rebuild it, but the
+  name is free.
+- **`status` answered about the session instead of the topic.** It
+  ignored the `project` argument, so an agent asking about a topic got
+  the session's state - idle, for any caller outside a session - and went
+  to read the files instead. It now returns the topic's goal, phase,
+  task, narrative, plan, claim count, review count and pause state.
+- **A guard that failed open.** The guard on the state tree used `re`
+  without importing it, and the exception was swallowed by the outer
+  handler, so every check threw and every write was allowed. Guards that
+  break are worse than no guard, because they report a clean sheet.
+- **A batch that stopped at the first bad row.** One inference missing
+  its type raised and the rest of the batch was lost, while the tool
+  reported that it had recorded one claim and gave no reason.
+- **A new column that was not written.** The amended-from values were
+  filtered out by the writer, so a revision left no trace.
+
+### Changed
+
+- The thinking rules are the body of the injected block and the full
+  assertion format lives in the tool description. A block whose job is
+  to make the agent think should not be mostly a form.
+- The rules are never cut in half. A half-list of moves is worse than no
+  list, because the agent reads the heading of a set and none of the set.
+  When they do not fit, the tool call line goes in instead - it is
+  shorter than either rule block, and it is what keeps the ledger alive.
+
 ## [0.2.1] — 2026-10-25
 
 ### Added

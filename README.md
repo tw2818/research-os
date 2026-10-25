@@ -372,6 +372,7 @@ elsewhere.
 | `obsidian_enabled` | `true` | set `false` to skip the vault rendering |
 | `inject_protocol` | `true` | set `false` to turn the whole thing off |
 | `max_inject_chars` | `1600` | how much protocol text rides along |
+| `status_line` | `true` | every answer ends with one line of state: the topic, the phase, what this turn did, the ledger size, how far the last review is behind, and whether one is owed |
 | `searches_before_converge` | `20` | searches on one topic before the agent is asked to record or conclude; `0` turns the check off |
 | `review_every_searches` | `8` | searches on one topic before a global review is demanded |
 | `review_every_turns` | `6` | turns on one topic before a global review is demanded |

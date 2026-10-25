@@ -976,7 +976,99 @@ def test_transform_llm_output_asks_for_a_position_when_there_is_none():
     assert "Petrov 2020" not in out.split("---")[-1]
 
 
+def test_the_status_line_says_where_the_work_stands():
+    """The loop's state is in files the user never opens, so every answer
+    carries one line of it: the topic, the phase, what this turn did, how big
+    the ledger is, how far the last review is behind, and whether one is owed.
+    Without it a long run is a black box that reports on itself.
+    """
+    m = _handler()
+    sid = "t-status"
+    name = "T-status"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler(
+        {"action": "create", "project": name, "core_question": "Q?"}, session_id=sid
+    )
+    m._tool_handler({"action": "on", "project": name}, session_id=sid)
+    m._tool_handler(
+        {"action": "set_state", "project": name, "phase": "writing"}, session_id=sid
+    )
+    m._tool_handler(
+        {
+            "action": "claim",
+            "project": name,
+            "claims": [
+                {"kind": "observation", "content": "甲", "source": "PMID 1"},
+                {"kind": "observation", "content": "乙", "source": "PMID 2"},
+            ],
+        },
+        session_id=sid,
+    )
+    state.note_tool_activity(sid, "t9", tool_name="web_search", is_evidence=True, is_ledger=0)
+    state.note_tool_activity(sid, "t9", tool_name="research_mode", is_evidence=False, is_ledger=2)
+    state.note_search_since_review(name)
+    state.note_review_demand(name)
+    rv = state.read_review(name)
+    rv["owed_turns"] = 2
+    state.write_review(name, rv)
+
+    out = m._transform_llm_output(
+        session_id=sid, turn_id="t9", response_text="这版按原框架改完，结论是残余缺损随阶段变化。"
+    )
+    assert out is not None
+    # The status line is the last line, below any note the check appended.
+    footer = out.rstrip().splitlines()[-1]
+    assert footer.startswith(f"科研 · {name} · 成文表达"), footer
+    assert "本轮 检索1 记账2" in footer, footer
+    assert "账本 2 条" in footer, footer
+    assert "审查后 1 次检索" in footer, footer
+    assert "欠审查 2 轮" in footer, footer
+
+
+def test_the_status_line_marks_a_topic_with_no_phase():
+    """A topic with no phase is healthy - the agent has not set one yet - and
+    the line has to say so rather than leave a gap where the stage goes."""
+    m = _handler()
+    sid = "t-status-nophase"
+    name = "T-status-nophase"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler(
+        {"action": "create", "project": name, "core_question": "Q?"}, session_id=sid
+    )
+    m._tool_handler({"action": "on", "project": name}, session_id=sid)
+    line = m._status_line(sid, name, "")
+    assert "阶段未定" in line, line
+    assert "本轮" not in line, line
+
+
+def test_the_status_line_can_be_turned_off():
+    m = _handler()
+    sid = "t-status-off"
+    name = "T-status-off"
+    if state.topic_exists(name):
+        state.delete_topic(name, permanent=True)
+    m._tool_handler(
+        {"action": "create", "project": name, "core_question": "Q?"}, session_id=sid
+    )
+    m._tool_handler({"action": "on", "project": name}, session_id=sid)
+    assert m._status_line(sid, name, "") != ""
+    state.save_config({"status_line": False})
+    try:
+        assert m._status_line(sid, name, "") == ""
+        out = m._transform_llm_output(
+            session_id=sid,
+            turn_id="t1",
+            response_text="综合来看，这更支持残余缺损确实存在。",
+        )
+        assert out is None, out
+    finally:
+        state.save_config({"status_line": True})
+
+
 def test_transform_llm_output_quiet_when_there_is_a_position():
+    """No demand for a position - only the status line, which is on always."""
     m = _handler()
     sid = "t-transform2"
     m._tool_handler(
@@ -996,7 +1088,11 @@ def test_transform_llm_output_quiet_when_there_is_a_position():
             "综合来看，这更支持残余缺损确实存在，而不是完全由当前症状解释。"
         ),
     )
-    assert out is None, out
+    assert out is not None, out
+    assert "没给判断" not in out, out
+    footer = out.split("---")[-1].strip()
+    assert footer.startswith("科研 · TrTopic2"), footer
+    assert "账本 1 条" in footer, footer
 
 
 def test_transform_llm_output_asks_for_a_position_with_an_empty_ledger():
@@ -2398,7 +2494,12 @@ def test_an_open_phase_does_not_demand_a_position():
     out = m._transform_llm_output(
         response_text=answer, session_id="t-open"
     )
-    assert out is None, out
+    # No demand for a position - but the status line rides on every answer,
+    # including this one, so "quiet" no longer means None.
+    assert out is not None, out
+    assert "没给判断" not in out, out
+    assert out.startswith(answer), out
+    assert "科研 · T-open · " in out, out
 
     # The same answer in a closing phase is a different answer: a
     # conclusion with no position in it is not a conclusion.

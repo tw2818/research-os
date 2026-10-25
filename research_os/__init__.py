@@ -2286,6 +2286,52 @@ def _is_move_call(args: Any) -> bool:
     return False
 
 
+def _status_line(session_id: str, topic: str, turn_id: str) -> str:
+    """One line saying where the work stands, on every answer.
+
+    The loop's state lives in files the user never opens: which topic, which
+    phase, what this turn did, how big the ledger is, how far the last review
+    is behind. From the chat that is a black box — the agent reports what it
+    chose to report, and nothing checks the report. This is the same state,
+    unsummarised by the agent, one line, in the place the user is already
+    looking.
+
+    It is a footer rather than a mid-turn message because the answer is the
+    only thing the host guarantees the user will see, and because a line per
+    reply is enough: the counters move on the scale of a turn, not a call.
+    """
+    try:
+        if not _state.load_config().get("status_line", True):
+            return ""
+        parts = ["科研", topic]
+        m = _state.read_map(topic)
+        parts.append(_protocol.phase_name(str(m.get("phase") or "")) or "阶段未定")
+
+        act = _state.turn_activity(session_id, turn_id) if turn_id else {}
+        ev = int(act.get("evidence") or 0)
+        led = int(act.get("ledger") or 0)
+        if ev or led:
+            parts.append(f"本轮 检索{ev} 记账{led}")
+
+        parts.append(f"账本 {len(_state.read_claims(topic))} 条")
+        open_q = len(m.get("open_questions") or [])
+        if open_q:
+            parts.append(f"未解 {open_q}")
+
+        rv = _state.read_review(topic)
+        since = rv.get("searches_since_review")
+        if isinstance(since, int):
+            parts.append(f"审查后 {since} 次检索")
+        owed = _state.review_owed(topic)
+        if owed.get("owed"):
+            parts.append(f"欠审查 {int(owed.get('turns') or 0)} 轮")
+        if rv.get("paused"):
+            parts.append("已暂停")
+        return " · ".join(part for part in parts if part)
+    except Exception:
+        return ""
+
+
 def _transform_llm_output(**kwargs: Any) -> str | None:
     """Check the outgoing answer against the ledger.
 
@@ -2297,7 +2343,9 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
 
     The answer is not rewritten. A note is appended when the answer contains
     an unaccounted assertion, because silently editing the agent's prose
-    would hide the very thing the ledger exists to surface.
+    would hide the very thing the ledger exists to surface. The status line
+    rides along at the bottom of every answer in research mode, so the user
+    can see where the work stands without reading the state tree.
     """
     try:
         response = str(kwargs.get("response_text") or "")
@@ -2328,13 +2376,12 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         strictness = _protocol.phase_strictness(
             str(_state.read_map(topic).get("phase") or "")
         )
+        notes: list[str] = []
         if strictness != "open" and not _audit.has_position(response):
-            return (
-                f"{response}\n\n"
-                f"---\n"
-                f"*[Research OS] 这一轮给的是材料，没给判断。"
-                f"读者要自己合成，而合成正是最该有人做的一步。"
-                f"补一句你目前认为什么、依据哪几条、什么会改变它。*"
+            notes.append(
+                "*[Research OS] 这一轮给的是材料，没给判断。"
+                "读者要自己合成，而合成正是最该有人做的一步。"
+                "补一句你目前认为什么、依据哪几条、什么会改变它。*"
             )
 
         # A review was asked for and this answer did not make one. The agent
@@ -2347,14 +2394,18 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         if owed.get("owed") and not _state.session_reviewed_this_turn(session_id):
             tries = owed.get("demanded") or 0
             turns = owed.get("turns") or 0
-            return (
-                f"{response}\n\n"
-                f"---\n"
+            notes.append(
                 f"*[Research OS] 这个课题的全局审查已催 {tries} 次、跨 {turns} 轮，"
                 f"本轮仍未做。审查要回答的是：如果继续检索，预期会改变哪个判断？"
                 f"答不出来，就该收手，而不是继续找材料。*"
             )
-        return None
+
+        footer = _status_line(session_id, topic, str(kwargs.get("turn_id") or ""))
+        if footer:
+            notes.append(footer)
+        if not notes:
+            return None
+        return f"{response}\n\n---\n" + "\n\n".join(notes)
     except Exception:
         return None
 

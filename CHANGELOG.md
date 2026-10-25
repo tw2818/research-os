@@ -54,6 +54,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.6.2] — 2026-10-25
+
+- **Every answer now ends with one line of state.** The loop's state lives in
+  files the user never opens — which topic, which phase, what this turn did,
+  how big the ledger is, how far the last review is behind, whether a review
+  is owed — so from the chat a long run is a black box that reports on itself,
+  and nothing checks the report. The line is appended by
+  `transform_llm_output`, the only hook that sees the text the user is about
+  to read, and it is the state read back from the tree rather than the
+  agent's account of it. `status_line: false` turns it off. It rides below
+  any note the same hook already appends, and it never replaces an answer:
+  the agent's prose is untouched above it.
+
 ## [0.6.1] — 2026-10-25
 
 - **The counters could not see the work the loop is built on.** One live

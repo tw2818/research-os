@@ -209,6 +209,19 @@ def phase_strictness(phase: str) -> str:
     return key or "mixed"
 
 
+def phase_name(phase: str) -> str:
+    """The phase's name, for a reader who sees one word and not the block.
+
+    Empty when no phase has been set yet: a new topic has none until the
+    agent sets one, and that is a healthy state, not a missing one.
+    """
+    key = str(phase or "").strip()
+    if not key:
+        return ""
+    entry = PHASES.get(key)
+    return str(entry.get("name") or key) if entry else key
+
+
 def phase_thinking(phase: str) -> str:
     """The thinking instruction for a phase, with its name."""
     entry = PHASES.get(str(phase or "").strip())

@@ -154,6 +154,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # inside invites someone to edit the wrong file.
     "notes_dir": "",
     "inject_protocol": True,
+    # Whether every answer in research mode ends with one line saying where
+    # the work stands. Off means the loop is invisible from the chat: the
+    # topic, the phase and the counters live in files the user never opens.
+    "status_line": True,
     # The block carries the project's standing, the situation, the thinking
     # moves and what the phase is for. It is long because the alternative is
     # an agent that answers the question in front of it and forgets the one

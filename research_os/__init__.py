@@ -31,7 +31,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 
-def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any, Any]:
+def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     """Load the implementation modules under a private namespace.
 
     Two problems this avoids.
@@ -59,7 +59,7 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any, Any]:
     mods: dict[str, Any] = {}
     # `state` first: `protocol` and `validate` import it at module level, so
     # it must exist in sys.modules before they are executed.
-    for short in ("state", "audit", "classify", "protocol", "validate", "reviewer"):
+    for short in ("state", "audit", "classify", "protocol", "validate", "reviewer", "synthesis"):
         full = f"{ns}.{short}"
         path = _HERE / f"{short}.py"
         # Drop any cached bytecode for this file first. A .pyc is validated
@@ -83,6 +83,7 @@ def _load_impl_modules() -> tuple[Any, Any, Any, Any, Any, Any]:
         mods["state"],
         mods["validate"],
         mods["reviewer"],
+        mods["synthesis"],
     )
 
 
@@ -114,7 +115,7 @@ for _cached in Path(__file__).resolve().parent.glob("__pycache__/*.pyc"):
         pass
 
 try:
-    _audit, _classify, _protocol, _state, _validate, _reviewer = _load_impl_modules()
+    _audit, _classify, _protocol, _state, _validate, _reviewer, _synthesis = _load_impl_modules()
 except Exception:  # pragma: no cover - package layout (repo / tests)
     from . import audit as _audit  # type: ignore[no-redef]
     from . import classify as _classify  # type: ignore[no-redef]
@@ -122,6 +123,7 @@ except Exception:  # pragma: no cover - package layout (repo / tests)
     from . import state as _state  # type: ignore[no-redef]
     from . import validate as _validate  # type: ignore[no-redef]
     from . import reviewer as _reviewer  # type: ignore[no-redef]
+    from . import synthesis as _synthesis  # type: ignore[no-redef]
 
 # The implementation modules under their public names, so the repo's own
 # tests and scripts address the same modules the plugin runs. Without this,
@@ -133,6 +135,7 @@ protocol = _protocol
 state = _state
 validate = _validate
 reviewer = _reviewer
+synthesis = _synthesis
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +182,12 @@ TOOL_SCHEMA: dict[str, Any] = {
         "issues pinned to a specific claim or route. Leaving 收敛 for 更新科研状态 needs a "
         "verdict of pass or pass_with_caveat; after gate_max_rounds the gate lets the work "
         "through with the caveat recorded. "
+        "ACTION 'synthesize' is for a parent topic: it reads every branch's own state and returns a "
+        "digest of what only the parent can say - sources two branches both rely on, pairs of "
+        "claims that say nearly the same thing, conflicts still open, branches that closed after the "
+        "parent last revised its narrative - plus the demands the write-back has to answer. The "
+        "digest is counted, not asked of a model; the judgement is the agent's, and a parent may not "
+        "advance to 收敛 or 更新科研状态 while a closed branch has not been synthesised. "
         "ACTION 'protocol' writes and freezes the plan: estimand (the quantity actually "
         "being estimated - not the question), inclusion / exclusion (separated by '|'), "
         "primary_outcome, falsifier (what result would show the claim wrong), and the "
@@ -216,7 +225,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "contradict", "question", "hypothesis", "map",
                     "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
-                    "protocol", "branch", "gate",
+                    "protocol", "branch", "gate", "synthesize",
                 ],
                 "description": "What to do.",
             },
@@ -1459,6 +1468,70 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 )
             return ok(payload)
 
+        if action == "synthesize":
+            # What the parent learns from its branches. The digest is counted
+            # from the branches' own state, not asked of a model: shared
+            # sources, near-duplicate claims, open conflicts and branches
+            # closed since the parent last revised its story are facts about
+            # the material, and a model asked to "synthesise" without them
+            # writes a plausible paragraph about how the branches relate.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            branches = _state.list_branches(project)
+            if not branches:
+                return fail(
+                    f"「{project}」还没有分支，没有可综合的东西。"
+                    f"先把路线开出来（action='branch'），或者这个课题本来就不该是父课题。"
+                )
+            parent_map = _state.read_map(project)
+            branch_state: dict[str, Any] = {}
+            for row in branches:
+                child = str(row.get("child") or "").strip()
+                if not child or not _state.topic_exists(child):
+                    continue
+                cm = _state.read_map(child)
+                branch_state[child] = {
+                    "phase": _protocol.phase_name(str(cm.get("phase") or "")),
+                    "narrative": str(cm.get("narrative") or ""),
+                    "claims": _state.read_claims(child),
+                    "contradictions": _state.read_contradictions(child).get("items") or [],
+                }
+            digest = _synthesis.build_digest(
+                project,
+                parent_map=parent_map,
+                branches=branches,
+                branch_state=branch_state,
+            )
+            record = {
+                "at": _state.now(),
+                "branches": [str(b.get("id") or "") for b in branches],
+                "shared_sources": len(digest.get("shared_sources") or []),
+                "overlapping_claims": len(digest.get("overlapping_claims") or []),
+                "open_conflicts": len(digest.get("open_conflicts") or []),
+                "unsynthesised": digest.get("unsynthesised") or [],
+                "digest": digest,
+            }
+            _state.append_synthesis(project, record)
+            payload: dict[str, Any] = {
+                "topic": project,
+                "summary": _synthesis.summarize(digest),
+                "branches": digest.get("branches"),
+                "shared_sources": digest.get("shared_sources"),
+                "overlapping_claims": digest.get("overlapping_claims"),
+                "open_conflicts": digest.get("open_conflicts"),
+                "unsynthesised": digest.get("unsynthesised"),
+                "demands": digest.get("demands"),
+                "next": (
+                    "综合的料在这了，判断还是你的。把这轮结论写回父课题："
+                    "set_state 带 narrative（现在的判断变了什么）和 plan（下一步），"
+                    "再记一条 inference 主张，前提是各分支的主张。"
+                    "写完之后再推进发散或找证据。"
+                ),
+            }
+            return ok(payload)
+
         if action == "protocol":
             # The plan, frozen before the searching starts. Every synthesis in
             # this literature fixes its inclusion criteria, its primary
@@ -1536,11 +1609,24 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     )
                 if parent == project:
                     return fail("a topic cannot be its own parent")
+                if parent and _state.would_cycle(project, parent):
+                    return fail(
+                        f"「{parent}」的祖先链上有「{project}」自己，这样挂上去树就成环了："
+                        f"渲染时深度游走会绕不出去，删父课题时也理不清谁该跟谁走。"
+                        f"换一个父课题，或者先把中间那一层的关系改掉。"
+                    )
             narrative = args.get("narrative")
             plan = args.get("plan")
             every = args.get("review_every")
             core_q = args.get("core_question")
             q_reason = args.get("question_reason")
+            if core_q is not None and str(core_q).strip():
+                current_q = str(_state.read_map(project).get("core_question") or "").strip()
+                if str(core_q).strip() != current_q and not str(q_reason or "").strip():
+                    return fail(
+                        "改核心问题必须给 question_reason：旧问题会留在历史里，"
+                        "但没有理由的替换，事后看跟「一直就是这个」分不开。"
+                    )
             exploration = args.get("exploration")
             if every is not None and not isinstance(every, dict):
                 return fail("review_every must be an object")
@@ -1621,6 +1707,26 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                             "上一次审稿之后状态又改过了，那次审的是更早的版本。"
                             "重跑一次 gate 再往下写。"
                         )
+                # A parent that closes a round without accounting for the
+                # branches that finished during it is a table of contents,
+                # not a synthesis: the children did the work and the parent
+                # never said what it added up to.
+                if key in ("converging", "updating"):
+                    routes = _state.list_branches(project)
+                    pending = [
+                        str(b.get("id") or "")
+                        for b in routes
+                        if str(b.get("status") or "") in ("concluded", "merged")
+                        and float(b.get("closed_at") or 0)
+                        > float(_state.last_synthesis(project).get("at") or 0)
+                    ]
+                    if pending:
+                        return fail(
+                            f"「{project}」有 {len(pending)} 条分支（{'、'.join(pending)}）收掉之后"
+                            f"父课题还没综合过。先 action='synthesize' 看跨分支的共用证据、"
+                            f"近似主张、还没分开的冲突，再把判断写回 narrative 和 plan——"
+                            f"分支干完了活，父课题得说清合起来是什么。"
+                        )
             before = _state.read_phase(project)
             m = _state.write_state(
                 project,
@@ -1635,11 +1741,18 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 question_reason=q_reason,
                 exploration=exploration,
             )
-            # Updating the standing is what lifts a pause: the review said
-            # the work had drifted, and the agent has now said where it is
-            # going. That closes the loop, and the searching can resume.
+            # Updating the standing is what lifts a pause - but only the part
+            # of the standing that answers the review. The review said the
+            # work had drifted; a note recording an exploration, or a parent
+            # link, says nothing about where the work is going now, and
+            # lifting the pause for it makes `pause` a state a call clears
+            # rather than a decision the project has to meet.
             was_paused = _state.topic_is_paused(project)
-            if was_paused:
+            answers_pause = any(
+                value is not None and str(value).strip()
+                for value in (narrative, plan, core_q)
+            )
+            if was_paused and answers_pause:
                 _state.clear_pause(project)
             if phase is not None and str(phase).strip() != before:
                 _state.record_phase_change(
@@ -1656,7 +1769,8 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     "core_question": m.get("core_question"),
                     "question_changed": bool(m.get("question_history")),
                     "explorations": len(m.get("explorations") or []),
-                    "resumed": was_paused,
+                    "resumed": was_paused and answers_pause,
+                    "still_paused": was_paused and not answers_pause,
                 }
             )
 
@@ -1797,7 +1911,18 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 return fail("project is required")
             m = _state.read_map(project)
             if "core_question" in args and args.get("core_question"):
-                m["core_question"] = str(args["core_question"]).strip()
+                # One door. This used to write the field straight into the
+                # map while `set_state` recorded the old question and the
+                # reason - so the rule held on the path people were told to
+                # use and not on the shorter one.
+                try:
+                    m = _state.add_core_question_change(
+                        m,
+                        str(args["core_question"]),
+                        str(args.get("question_reason") or args.get("note") or ""),
+                    )
+                except ValueError as exc:
+                    return fail(str(exc))
             if "hypotheses" in args:
                 m["hypotheses"] = _split_list(args.get("hypotheses"), sep="|")
             if "tags" in args:

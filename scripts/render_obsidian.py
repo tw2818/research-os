@@ -927,6 +927,55 @@ def _render_routes(topic: str, *, obsidian: bool) -> str:
     return "\n".join(lines)
 
 
+def _render_synthesis(topic: str, *, obsidian: bool) -> str:
+    """What the parent learned from its branches, on the parent's page.
+
+    A parent whose page shows only a list of child topics is a table of
+    contents. The reader has to be able to see the last cross-branch
+    judgement and what it was made of.
+    """
+    rows = _safe(lambda: state.list_branches(topic), [])
+    if not rows:
+        return ""
+    data = _safe(lambda: state.read_syntheses(topic), {"syntheses": []})
+    records = [r for r in (data.get("syntheses") or []) if isinstance(r, dict)]
+    lines: list[str] = ["## 跨路线综合", ""]
+    if not records:
+        lines += [
+            "还没有综合过。有分支收尾之后，`research_mode(action='synthesize')` "
+            "会把共用文献、近似主张、还开着的冲突列出来——父课题要对着这些给出判断。",
+            "",
+        ]
+        return "\n".join(lines)
+    last = records[-1]
+    lines += [f"最近一次综合：{_fmt_ts(last.get('at'))}，覆盖 {len(last.get('branches') or [])} 条路线。", ""]
+    digest = last.get("digest") or {}
+    shared = digest.get("shared_sources") or []
+    if shared:
+        lines.append("共用文献：" + "；".join(
+            f"{s.get('source')}（{'、'.join(s.get('branches') or [])}）" for s in shared[:6]
+        ))
+        lines.append("")
+    overlaps = digest.get("overlapping_claims") or []
+    if overlaps:
+        lines.append(f"近似主张 {len(overlaps)} 对，最强一对：{overlaps[0].get('a')} ／ {overlaps[0].get('b')}"
+                     f"（{overlaps[0].get('score')}）")
+        lines.append("")
+    conflicts = digest.get("open_conflicts") or []
+    if conflicts:
+        lines.append(f"还没分开的冲突 {len(conflicts)} 个：" + "；".join(
+            str(c.get("title") or "") for c in conflicts[:4]
+        ))
+        lines.append("")
+    demands = digest.get("demands") or []
+    if demands:
+        lines += ["当时要求写回父课题的要回答的：", ""] + [f"- {d}" for d in demands] + [""]
+    if len(records) > 1:
+        lines.append(f"（历次综合 {len(records)} 次。）")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _render_reviews(topic: str, *, obsidian: bool) -> str:
     """Every attempt the review gate saw, in order.
 
@@ -1049,9 +1098,10 @@ def render_topic(
         existing = p.read_text(encoding="utf-8")
     except OSError:
         existing = ""
-    if existing and "## 路线（分支）" not in existing:
-        _w(p, existing.rstrip("\n") + "\n\n" + _render_routes(topic, obsidian=obsidian))
-    elif not existing:
+    if existing:
+        extra = _render_routes(topic, obsidian=obsidian) + "\n" + _render_synthesis(topic, obsidian=obsidian)
+        _w(p, existing.rstrip("\n") + "\n\n" + extra.rstrip("\n") + "\n")
+    else:
         _w(p, _render_routes(topic, obsidian=obsidian))
     if map_only:
         return written

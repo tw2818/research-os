@@ -22,7 +22,7 @@ os.environ["RESEARCH_OS_HOME"] = _TMP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from research_os import audit, classify, protocol, reviewer, state  # noqa: E402
+from research_os import audit, classify, protocol, reviewer, state, synthesis  # noqa: E402
 from research_os.validate import validate_claims  # noqa: E402
 
 
@@ -1606,6 +1606,173 @@ def test_an_empty_reply_falls_back_to_the_structured_call():
     record = state.last_gate_review("T-gate-retry")
     assert record["via"] == "structured" and record["attempts"] == 2, record
     assert fake.structured_calls == 1
+
+
+def test_the_map_cannot_rewrite_the_core_question_without_a_reason():
+    """One door. `set_state` recorded the old question and the reason; the
+    `map` action wrote the field straight into the file, so the rule held on
+    the path people were told to use and not on the shorter one."""
+    m = _handler()
+    sid = "t-map-q"
+    if state.topic_exists("T-map-q"):
+        state.delete_topic("T-map-q", permanent=True)
+    m._tool_handler({"action": "create", "project": "T-map-q", "core_question": "旧问题？"}, session_id=sid)
+    bare = json.loads(m._tool_handler(
+        {"action": "map", "project": "T-map-q", "core_question": "新问题？"}, session_id=sid
+    ))
+    assert "error" in bare and "question_reason" in bare["error"], bare
+    assert state.read_map("T-map-q")["core_question"] == "旧问题？"
+    ok_out = json.loads(m._tool_handler(
+        {"action": "map", "project": "T-map-q", "core_question": "新问题？",
+         "question_reason": "旧问题把测量和构念混在一起"},
+        session_id=sid,
+    ))
+    assert "error" not in ok_out, ok_out
+    hist = state.read_map("T-map-q").get("question_history") or []
+    assert hist and hist[-1]["was"] == "旧问题？" and hist[-1]["now"] == "新问题？", hist
+    assert "测量和构念" in hist[-1]["why"], hist[-1]
+
+
+def test_a_parent_link_may_not_close_a_loop():
+    """`parent == topic` catches the shortest loop and nothing else. A parent
+    whose own parent is this topic makes a cycle the depth walk cannot leave."""
+    m = _handler()
+    if state.topic_exists("T-loop-a"):
+        state.delete_topic("T-loop-a", permanent=True)
+    if state.topic_exists("T-loop-b"):
+        state.delete_topic("T-loop-b", permanent=True)
+    m._tool_handler({"action": "create", "project": "T-loop-a", "core_question": "A?"}, session_id="t-loop")
+    m._tool_handler({"action": "create", "project": "T-loop-b", "core_question": "B?"}, session_id="t-loop")
+    first = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-loop-b", "parent": "T-loop-a"}, session_id="t-loop"
+    ))
+    assert "error" not in first, first
+    looped = json.loads(m._tool_handler(
+        {"action": "set_state", "project": "T-loop-a", "parent": "T-loop-b"}, session_id="t-loop"
+    ))
+    assert "error" in looped and "环" in looped["error"], looped
+    assert str(state.read_map("T-loop-a").get("parent") or "") == ""
+
+
+def test_a_pause_lifts_only_when_the_standing_says_where_the_work_goes():
+    m = _handler()
+    sid = "t-pause-lift"
+    if state.topic_exists("T-pause-lift"):
+        state.delete_topic("T-pause-lift", permanent=True)
+    m._tool_handler({"action": "create", "project": "T-pause-lift", "core_question": "Q?"}, session_id=sid)
+    m._tool_handler({
+        "action": "review", "project": "T-pause-lift", "verdict": "pause",
+        "review_note": "在查干预研究，核心问题其实是病因",
+    }, session_id=sid)
+    assert state.topic_is_paused("T-pause-lift")
+    # A note about an exploration says nothing about where the work goes.
+    side = json.loads(m._tool_handler({
+        "action": "set_state", "project": "T-pause-lift",
+        "exploration": "在另一个框架里找过反例，没找到",
+    }, session_id=sid))
+    assert side.get("still_paused") is True, side
+    assert state.topic_is_paused("T-pause-lift"), "an exploration note must not lift a pause"
+    # A plan is an answer to the review.
+    lifted = json.loads(m._tool_handler({
+        "action": "set_state", "project": "T-pause-lift",
+        "plan": "下一轮改查病因方向的四个预测",
+    }, session_id=sid))
+    assert lifted.get("resumed") is True, lifted
+    assert not state.topic_is_paused("T-pause-lift")
+
+
+def test_a_parent_must_synthesise_what_its_branches_produced():
+    """Branches that finish without the parent saying what they add up to
+    leave a folder of findings, not a review."""
+    m = _handler()
+    parent = "T-syn-parent"
+    if state.topic_exists(parent):
+        state.delete_topic(parent, permanent=True)
+    m._tool_handler({"action": "create", "project": parent, "core_question": "情感与认知是什么关系？"},
+                    session_id="t-syn")
+    m._tool_handler({"action": "on", "project": parent}, session_id="t-syn")
+    state.write_state(parent, phase="diverging")
+    for route in ("病程路线：短端和长端是不是同一个量", "环路路线：MD-mPFC 是否解释两域"):
+        got = json.loads(m._tool_handler(
+            {"action": "branch", "project": parent, "route": route,
+             "why_relevant": "核心问题的不同侧面"},
+            session_id="t-syn",
+        ))
+        assert "error" not in got, got
+    children = [b["child"] for b in state.list_branches(parent)]
+    for child in children:
+        state.write_state(child, parent=parent, narrative=f"{child} 的判断：短端看不到额外增益")
+    state.append_claim(
+        children[0],
+        {"kind": "observation", "content": "八周安慰剂对照未见额外认知增益",
+         "source": "PMID 12345678", "status": "active"},
+    )
+    state.append_claim(
+        children[1],
+        {"kind": "observation", "content": "八周安慰剂对照未见额外认知增益的重复报告",
+         "source": "PMID 12345678", "status": "active"},
+    )
+    closed = json.loads(m._tool_handler(
+        {"action": "branch", "project": parent, "branch_id": "B1", "branch_status": "concluded",
+         "contribution": "短窗口内没有可检出的认知增益"},
+        session_id="t-syn",
+    ))
+    assert "error" not in closed, closed
+    blocked = json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent, "phase": "converging"}, session_id="t-syn"
+    ))
+    assert "error" in blocked and "synthesize" in blocked["error"], blocked
+
+    digest = json.loads(m._tool_handler(
+        {"action": "synthesize", "project": parent}, session_id="t-syn"
+    ))
+    assert "error" not in digest, digest
+    assert digest["shared_sources"], digest
+    assert digest["shared_sources"][0]["source"] == "PMID 12345678", digest
+    assert digest["overlapping_claims"], digest
+    assert digest["demands"], digest
+    assert "B1" in digest["unsynthesised"], digest
+    assert state.last_synthesis(parent), "the digest has to be on the record"
+
+    write_back = json.loads(m._tool_handler({
+        "action": "set_state", "project": parent,
+        "narrative": "两条路线合起来：短窗口的增益缺证据，长窗口的变化还要看缓解状态",
+        "plan": "补 B2 的环路证据，再定父课题的结论强度",
+    }, session_id="t-syn"))
+    assert "error" not in write_back, write_back
+    through = json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent, "phase": "converging"}, session_id="t-syn"
+    ))
+    assert "error" not in through, through
+
+
+def test_the_synthesis_digest_counts_rather_than_judges():
+    """The digest reports what is in the material; it never decides. Counting
+    shared sources and near-duplicate claims is not judgement, and a model
+    asked to "synthesise" without them writes a paragraph instead."""
+    digest = synthesis.build_digest(
+        "P",
+        parent_map={"narrative_at": 100.0},
+        branches=[
+            {"id": "B1", "child": "P-B1", "route": "r1", "status": "concluded",
+             "contribution": "c1", "closed_at": 200.0},
+            {"id": "B2", "child": "P-B2", "route": "r2", "status": "open",
+             "contribution": "", "closed_at": None},
+        ],
+        branch_state={
+            "P-B1": {"phase": "收敛", "narrative": "n1", "claims": [
+                {"kind": "observation", "content": "八周安慰剂对照没有额外认知增益", "source": "S1"},
+            ], "contradictions": [{"title": "练习效应", "separator": "对照是否复测", "status": "open"}]},
+            "P-B2": {"phase": "找证据", "narrative": "n2", "claims": [
+                {"kind": "observation", "content": "八周安慰剂对照没有额外的认知增益", "source": "S1"},
+            ], "contradictions": []},
+        },
+    )
+    assert digest["branch_count"] == 2 and digest["concluded"] == 1, digest
+    assert digest["shared_sources"] == [{"source": "S1", "branches": ["B1", "B2"]}], digest
+    assert digest["overlapping_claims"], digest
+    assert digest["unsynthesised"] == ["B1"], digest
+    assert any("练习效应" in d for d in digest["demands"]), digest["demands"]
 
 
 class _FakeCtx:

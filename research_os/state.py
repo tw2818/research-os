@@ -546,6 +546,9 @@ def write_state(
         m[MAP_TASK] = str(current_task).strip()
     if narrative is not None:
         m[MAP_NARRATIVE] = str(narrative).strip()
+        # The clock the synthesis digest reads: a branch that closed after
+        # this point has not been accounted for in the parent's story yet.
+        m["narrative_at"] = now()
     if parent is not None:
         m[MAP_PARENT] = str(parent).strip()
     if plan is not None:
@@ -1755,4 +1758,119 @@ def write_gate(topic: str, data: dict[str, Any]) -> None:
 
 def last_gate_review(topic: str) -> dict[str, Any]:
     rows = [r for r in read_gate(topic).get("reviews") or [] if isinstance(r, dict)]
+    return rows[-1] if rows else {}
+
+
+# --------------------------------------------------------------------------
+# a question that changes has to leave a trace, wherever it is changed from
+# --------------------------------------------------------------------------
+#
+# `set_state` recorded the old question and the reason; `action="map"` wrote
+# `m["core_question"]` straight into the file. Two ways in, one of them
+# silent, and the silent one wins because it is the shorter call - so the
+# rule "a redefined question is visible as a redefined question" held only
+# for the path people were told to use.
+
+
+def add_core_question_change(m: dict[str, Any], new_question: str, reason: str) -> dict[str, Any]:
+    """Record a redefinition on a map that is about to be written.
+
+    Both entry points go through here, so there is no second door. The reason
+    is required: a question that changed without one is indistinguishable,
+    later, from a question that was always this and a project that drifted.
+    """
+    new_q = str(new_question or "").strip()
+    old_q = str(m.get(MAP_CORE_QUESTION) or "").strip()
+    reason_text = str(reason or "").strip()
+    if not new_q:
+        raise ValueError("core_question cannot be empty")
+    if new_q == old_q:
+        return m
+    if not reason_text:
+        raise ValueError(
+            "question_reason is required when the core question changes: "
+            "the old question is kept, and a record of why it was replaced "
+            "is what makes the change readable later"
+        )
+    hist = list(m.get(MAP_QUESTION_HISTORY) or [])
+    hist.append({"was": old_q, "now": new_q, "why": reason_text, "at": now()})
+    m[MAP_QUESTION_HISTORY] = hist[-20:]
+    m[MAP_CORE_QUESTION] = new_q
+    m["question_redefined_at"] = now()
+    return m
+
+
+# --------------------------------------------------------------------------
+# the tree must not close on itself
+# --------------------------------------------------------------------------
+
+
+def would_cycle(topic: str, parent: str, limit: int = 16) -> bool:
+    """True when making `parent` the parent of `topic` closes a loop.
+
+    Checking `parent == topic` catches the shortest loop and nothing else. A
+    parent whose own parent is this topic makes the tree a cycle, and a
+    renderer or a depth walk that meets one either loops or silently stops.
+    """
+    candidate = str(parent or "").strip()
+    if not candidate:
+        return False
+    if candidate == topic:
+        return True
+    seen = {candidate}
+    current = candidate
+    for _ in range(limit):
+        up = str(read_map(current).get(MAP_PARENT) or "").strip()
+        if not up:
+            return False
+        if up == topic:
+            return True
+        if up in seen:
+            # The chain already loops somewhere else. Refusing to add to it
+            # keeps the damage where it is instead of spreading it.
+            return True
+        seen.add(up)
+        current = up
+    return True
+
+
+# --------------------------------------------------------------------------
+# synthesis: what the parent learns from its branches
+# --------------------------------------------------------------------------
+#
+# A tree whose parent only ever points at its children is a table of contents.
+# The point of the parent is the judgement nobody can make from any single
+# branch: this evidence appears in two of them, these two conclusions cannot
+# both be true, this branch's result changes what the parent's story says.
+#
+# The record is kept so that "the parent has been synthesised since the last
+# branch closed" is a checkable fact rather than a claim the agent makes.
+
+SYNTHESIS_FILE = "syntheses.json"
+
+
+def synthesis_path(topic: str) -> Path:
+    return topic_dir(topic) / SYNTHESIS_FILE
+
+
+def read_syntheses(topic: str) -> dict[str, Any]:
+    data = _read_json(synthesis_path(topic), {"syntheses": []})
+    if not isinstance(data, dict):
+        return {"syntheses": []}
+    if not isinstance(data.get("syntheses"), list):
+        data["syntheses"] = []
+    return data
+
+
+def append_synthesis(topic: str, record: dict[str, Any]) -> dict[str, Any]:
+    data = read_syntheses(topic)
+    rows = [r for r in data.get("syntheses") or [] if isinstance(r, dict)]
+    rows.append(record)
+    data["syntheses"] = rows[-40:]
+    _write_json(synthesis_path(topic), data)
+    return data
+
+
+def last_synthesis(topic: str) -> dict[str, Any]:
+    rows = [r for r in read_syntheses(topic).get("syntheses") or [] if isinstance(r, dict)]
     return rows[-1] if rows else {}

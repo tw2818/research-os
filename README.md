@@ -179,6 +179,34 @@ record.
 
 ---
 
+## Cross-branch synthesis
+
+A parent topic that only points at its children is a table of contents. The
+point of the parent is the judgement nobody can make from one branch: this
+trial is relied on by two of them, these two conclusions cannot both hold,
+this branch's result changes what the parent's story says.
+
+`research_mode(action='synthesize', project=parent)` builds a digest from the
+branches' own state — not from the agent's account of them:
+
+| what it counts | why it is counted rather than asked |
+|---|---|
+| sources two or more branches rely on | the same paper supporting two conclusions is either corroboration or double counting, and only the list shows it |
+| pairs of claims that say nearly the same thing | one is redundant, or the difference between them is the finding |
+| conflicts still open in any branch | an unresolved separator is the next thing to look for |
+| branches that closed after the parent last revised its narrative | the parent is behind its own tree |
+
+Chinese tokenising is by character bigram, because a run of Chinese has no
+spaces and two sentences differing by three characters would otherwise share
+no tokens at all.
+
+The digest carries `demands` — the specific things a write-back has to answer.
+The judgement stays with the agent, and a parent may not advance to `converging`
+or `updating` while a closed branch has not been synthesised: sub-projects
+finish and the parent has to say what they add up to before the next round.
+
+---
+
 ## The four claim types
 
 The core discipline. A blanket "every sentence needs a citation" rule would
@@ -265,6 +293,9 @@ A topic is one research question and the state that accumulates around it:
     branches.json          the routes this topic opened: route, why it
                             serves the core question, status, the child topic
                             it became, and what closing it contributed
+    syntheses.json          each cross-branch synthesis: which branches it
+                             covered, the digest it was made from, and what it
+                             demanded the parent answer
     gate-reviews.json      every review the gate made, with scores, blocking
                             issues and the verdict, kept so a project waved
                             through reads that way
@@ -524,6 +555,7 @@ research_mode(action="branch", project="X", route="...", why_relevant="...")
 research_mode(action="branch", project="X", branch_id="B1",
               branch_status="concluded", contribution="...")
 research_mode(action="gate", project="X", gate_reason="...")
+research_mode(action="synthesize", project="X")
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")
 research_mode(action="library", project="X")

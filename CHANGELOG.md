@@ -54,6 +54,37 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.9.0] — 2026-10-25
+
+- **The parent synthesises its branches, or it does not close the round.**
+  `action='synthesize'` counts what only the parent can see: sources two
+  branches both rely on, pairs of claims that say nearly the same thing,
+  conflicts still open in any branch, and branches that closed after the
+  parent last revised its narrative. It returns the demands the write-back has
+  to answer, and a parent may not advance to `converging` or `updating` while
+  a closed branch has not been synthesised. The digest is counted, not asked
+  of a model: judgement stays with the agent, and a model handed no material
+  invents the relationship between branches instead of finding it.
+- **Chinese tokenising is by character bigram.** A run of Chinese has no
+  spaces, so the first version tokenised a whole sentence as one token and two
+  claims differing by three characters scored zero similarity.
+- **The core question has one door.** `set_state` recorded the old question
+  and the reason; `action='map'` wrote `m["core_question"]` straight into the
+  file. Both now go through `add_core_question_change`, which refuses a change
+  with no reason — a rule with a shorter bypass is not a rule.
+- **A parent link may not close a loop.** `parent == topic` caught the
+  shortest cycle only; a parent whose own parent is that topic made a cycle
+  the depth walk could not leave. `would_cycle` walks the ancestor chain.
+- **A pause lifts only on an answer to the pause.** Any successful `set_state`
+  cleared it, including one that only recorded an exploration or a parent
+  link — neither says where the work is going now. Lifting now needs
+  `narrative`, `plan` or `core_question`, and the payload says
+  `still_paused` when the note did not count.
+- **`has_position` is documented as a floor, not a validator.** It matches
+  words: it can say an answer has no position and cannot say whether the
+  position is sound. The semantic check is the gate; the docstring now says
+  so instead of leaving it to be inferred from the name.
+
 ## [0.8.0] — 2026-10-25
 
 - **The reviewer needs a large output budget, and finds out the hard way.**

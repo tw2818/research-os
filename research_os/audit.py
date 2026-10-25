@@ -250,8 +250,17 @@ def has_position(text: str) -> bool:
 
     A hedge that declines to stand behind the claim is not a position, even
     when it names a verb like "说明" or "提示". "这可能说明 X，需要更多研究"
-    says what might be true and then withholds judgment, which is the
-    failure the check is for.
+    says what might be true and then withholds judgment, which is the failure
+    the check is for.
+
+    **What this is not.** It is a floor, not a quality check. It matches
+    words, so it can tell that an answer has no position in it and cannot
+    tell whether the position is worth holding, whether the reasoning under it
+    works, or whether the claim's strength matches the ledger. The semantic
+    check is the gate (`action='gate'`), which reads the standing with a
+    model that did not write it. Treating this function as evidence that an
+    answer is sound is the mistake the gate exists to prevent, so it is
+    written down here rather than left to be inferred from the name.
     """
     if not text or not text.strip():
         return False

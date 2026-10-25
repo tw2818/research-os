@@ -1775,6 +1775,277 @@ def test_the_synthesis_digest_counts_rather_than_judges():
     assert any("练习效应" in d for d in digest["demands"]), digest["demands"]
 
 
+
+# --------------------------------------------------------------------------
+# cross-topic evidence, synthesis states, polarity, and parent directives
+# --------------------------------------------------------------------------
+
+
+def _family_pair(parent: str, child: str, *, route: str = "短窗口"):
+    """A parent with one branch under it, wired both ways."""
+    for name in (parent, child):
+        if state.topic_exists(name):
+            state.delete_topic(name, permanent=True)
+    state.create_topic(parent, "情感障碍与认知障碍是什么关系？")
+    state.create_topic(child, "短窗口内有没有额外认知增益？")
+    state.write_state(child, parent=parent)
+    return state.add_branch(parent, route=route, why="核心问题的短端", child=child)
+
+
+def test_a_parent_inference_may_rest_on_a_branch_claim():
+    """The judgement of a parent is about what its branches found. Until a
+    premise could name another topic's ledger, the honest move was to copy
+    the finding upward - which loses the route it came from."""
+    parent, child = "T-xp-parent", "T-xp-child"
+    _family_pair(parent, child)
+    state.append_claim(child, {
+        "kind": "observation",
+        "content": "八周安慰剂对照未见额外认知增益",
+        "source": "PMID 12345678",
+        "status": "verified",
+        "strength": "strong",
+    })
+    state.append_claim(parent, {
+        "kind": "inference",
+        "inference_type": "descriptive",
+        "content": "短端没有可检出的认知增益",
+        "premises": f"{child}:L1",
+        "strength": "strong",
+        "status": "derived",
+    })
+    report = validate_claims(parent)
+    assert not report["errors"], report["errors"]
+    assert report["cross_premises"], report
+    borrowed = report["cross_premises"][0]
+    assert borrowed["topic"] == child and borrowed["status"] == "verified", borrowed
+    assert borrowed["source"] == "PMID 12345678", borrowed
+
+
+def test_a_premise_may_not_be_imported_from_an_unrelated_topic():
+    """A conclusion imported from a stranger's ledger looks exactly like one
+    that was reasoned to, which is why it is refused rather than noted."""
+    for name in ("T-xp-a", "T-xp-b"):
+        if state.topic_exists(name):
+            state.delete_topic(name, permanent=True)
+    state.create_topic("T-xp-a", "问题 A？")
+    state.create_topic("T-xp-b", "问题 B？")
+    state.append_claim("T-xp-b", {
+        "kind": "observation", "content": "某篇文献的结论", "source": "PMID 99999999",
+        "status": "verified", "strength": "strong",
+    })
+    state.append_claim("T-xp-a", {
+        "kind": "inference", "inference_type": "descriptive",
+        "content": "借来的结论", "premises": "T-xp-b:L1", "strength": "strong",
+        "status": "derived",
+    })
+    report = validate_claims("T-xp-a")
+    codes = [e["code"] for e in report["errors"]]
+    assert "foreign_premise" in codes, report["errors"]
+
+
+def test_a_premise_naming_a_topic_that_does_not_exist_says_so():
+    if state.topic_exists("T-xp-c"):
+        state.delete_topic("T-xp-c", permanent=True)
+    state.create_topic("T-xp-c", "问题 C？")
+    state.append_claim("T-xp-c", {
+        "kind": "inference", "inference_type": "descriptive",
+        "content": "指向不存在的课题", "premises": "nowhere:L1", "strength": "strong",
+        "status": "derived",
+    })
+    codes = [e["code"] for e in validate_claims("T-xp-c")["errors"]]
+    assert "unknown_premise_topic" in codes or "foreign_premise" in codes
+
+
+def test_a_borrowed_premise_limits_how_strongly_the_parent_may_speak():
+    """The strength rule travels with the premise. A suggestive finding in a
+    branch cannot support an established claim in the parent."""
+    parent, child = "T-xp-str", "T-xp-str-child"
+    _family_pair(parent, child)
+    state.append_claim(child, {
+        "kind": "observation", "content": "小样本的趋势", "source": "PMID 11111111",
+        "status": "verified", "strength": "suggestive",
+    })
+    state.append_claim(parent, {
+        "kind": "inference", "inference_type": "descriptive",
+        "content": "两域是独立通路",
+        "premises": f"{child}:L1", "strength": "established", "status": "derived",
+    })
+    codes = [e["code"] for e in validate_claims(parent)["errors"]]
+    assert "overstated" in codes, validate_claims(parent)["errors"]
+
+
+def test_generating_a_digest_is_not_finishing_the_synthesis():
+    """Calling synthesize and moving on passed the old check, which only
+    compared timestamps. The digest has counted; nobody has judged."""
+    m = _handler()
+    parent = "T-syn-state"
+    if state.topic_exists(parent):
+        state.delete_topic(parent, permanent=True)
+    m._tool_handler({"action": "create", "project": parent, "core_question": "关系是什么？"}, session_id="t-ss")
+    m._tool_handler({"action": "on", "project": parent}, session_id="t-ss")
+    state.write_state(parent, phase="diverging")
+    for route in ("病程路线", "环路路线"):
+        got = json.loads(m._tool_handler(
+            {"action": "branch", "project": parent, "route": route, "why_relevant": "核心问题的一面"},
+            session_id="t-ss",
+        ))
+        assert "error" not in got, got
+    children = [b["child"] for b in state.list_branches(parent)]
+    state.append_claim(children[0], {
+        "kind": "observation", "content": "短端未见额外增益", "source": "PMID 22222222",
+        "status": "verified", "strength": "strong",
+    })
+    json.loads(m._tool_handler(
+        {"action": "branch", "project": parent, "branch_id": "B1",
+         "branch_status": "concluded", "contribution": "短端没有可检出的增益"},
+        session_id="t-ss",
+    ))
+    digest = json.loads(m._tool_handler({"action": "synthesize", "project": parent}, session_id="t-ss"))
+    assert "error" not in digest, digest
+    assert state.last_synthesis(parent)["state"] == state.SYNTHESIS_PENDING
+    blocked = json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent, "phase": "converging"}, session_id="t-ss"
+    ))
+    assert "error" in blocked and "判断" in blocked["error"], blocked
+    json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent,
+         "narrative": "短端没有增益，长端还要看缓解状态",
+         "plan": "补环路那一侧的证据"},
+        session_id="t-ss",
+    ))
+    assert state.last_synthesis(parent)["state"] == state.SYNTHESIS_JUDGED
+    through = json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent, "phase": "converging"}, session_id="t-ss"
+    ))
+    assert "error" not in through, through
+
+
+def test_the_synthesis_is_complete_when_a_parent_claim_rests_on_a_branch():
+    """`integrated` is not a mood: it is a ledger row of the parent's whose
+    premise points into a branch the digest covered."""
+    m = _handler()
+    parent, child = "T-syn-int", "T-syn-int-child"
+    _family_pair(parent, child)
+    state.append_claim(child, {
+        "kind": "observation", "content": "四域回到对照水平", "source": "PMID 33333333",
+        "status": "verified", "strength": "strong",
+    })
+    json.loads(m._tool_handler(
+        {"action": "branch", "project": parent, "branch_id": "B1",
+         "branch_status": "concluded", "contribution": "长期缓解者四域恢复"},
+        session_id="t-si",
+    ))
+    json.loads(m._tool_handler({"action": "synthesize", "project": parent}, session_id="t-si"))
+    json.loads(m._tool_handler(
+        {"action": "set_state", "project": parent, "narrative": "恢复取决于缓解状态",
+         "plan": "查缓解时长"}, session_id="t-si",
+    ))
+    assert state.last_synthesis(parent)["state"] == state.SYNTHESIS_JUDGED
+    got = json.loads(m._tool_handler({
+        "action": "claim", "project": parent,
+        "claim": {
+            "kind": "inference", "inference_type": "descriptive",
+            "content": "认知结局取决于缓解状态而不是发作次数",
+            "premises": f"{child}:L1", "strength": "strong", "status": "derived",
+        },
+    }, session_id="t-si"))
+    assert "error" not in got, got
+    last = state.last_synthesis(parent)
+    assert last["state"] == state.SYNTHESIS_INTEGRATED, last
+
+
+def test_opposite_wordings_are_reported_as_a_question_not_a_duplicate():
+    """'干预显著改善' and '干预未显著改善' share almost every token and mean
+    opposite things. The program may only say that it found the pair."""
+    digest = synthesis.build_digest(
+        "P",
+        parent_map={},
+        branches=[
+            {"id": "B1", "child": "P-B1", "route": "r1", "status": "open", "contribution": ""},
+            {"id": "B2", "child": "P-B2", "route": "r2", "status": "open", "contribution": ""},
+        ],
+        branch_state={
+            "P-B1": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": "干预显著改善认知表现", "source": "S1"},
+            ], "contradictions": []},
+            "P-B2": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": "干预未显著改善认知表现", "source": "S2"},
+            ], "contradictions": []},
+        },
+    )
+    pairs = digest["overlapping_claims"]
+    assert pairs, digest
+    assert pairs[0]["hint"] == "polarity_differs", pairs
+    assert pairs[0]["relation"] == "", "the program must not fill in the relation"
+    assert any("极性相反" in d for d in digest["demands"]), digest["demands"]
+
+
+def test_the_parent_can_tell_a_branch_what_to_do_next():
+    m = _handler()
+    parent, child = "T-dir", "T-dir-B1"
+    row = _family_pair(parent, child)
+    assert row["id"] == "B1"
+    no_reason = json.loads(m._tool_handler(
+        {"action": "directive", "project": parent, "branch_id": "B1", "decision": "redirect"},
+        session_id="t-dir",
+    ))
+    assert "error" in no_reason and "reason" in no_reason["error"], no_reason
+    sent = json.loads(m._tool_handler({
+        "action": "directive", "project": parent, "branch_id": "B1",
+        "decision": "redirect", "reason": "短端已排除，改查长端",
+        "next_question": "六个月缓解者是否回到对照水平", "priority": "high",
+    }, session_id="t-dir"))
+    assert "error" not in sent, sent
+    block = protocol.build_research_block(child)
+    assert "父课题" in block and "六个月缓解者" in block, block[:600]
+    assert "还没确认" in block, block[:600]
+    acked = json.loads(m._tool_handler({
+        "action": "acknowledge", "project": child,
+        "acknowledge_note": "这一轮就查这个",
+    }, session_id="t-dir"))
+    assert "error" not in acked, acked
+    directive = state.read_directive(parent, "B1")
+    assert directive["acknowledged_at"], directive
+    # A new instruction is a new instruction: the old receipt cannot speak
+    # for it.
+    state.set_directive(parent, "B1", decision="pause", reason="等文献到手")
+    assert state.read_directive(parent, "B1")["acknowledged_at"] is None
+
+
+
+
+def test_an_exploratory_plan_only_has_to_commit_to_what_would_refute_it():
+    """A systematic review can name its estimand and its inclusion criteria
+    before it looks at a record. An exploratory piece cannot, and freezing a
+    guess narrows it onto the first framing. What both can say is what would
+    make them wrong."""
+    m = _handler()
+    topic = "T-mode-x"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    json.loads(m._tool_handler({"action": "create", "project": topic, "core_question": "形状是什么？"},
+                               session_id="t-mode"))
+    strict = json.loads(m._tool_handler(
+        {"action": "protocol", "project": topic, "mode": "exploratory",
+         "falsifier": "如果两域的一致性完全由测量方式解释，就不是关系而是方法"},
+        session_id="t-mode"))
+    assert "error" not in strict, strict
+    assert strict["missing_before_freeze"] == [], strict
+    frozen = json.loads(m._tool_handler(
+        {"action": "protocol", "project": topic, "freeze": True}, session_id="t-mode"))
+    assert "error" not in frozen and frozen["locked"] is True, frozen
+    # The systematic mode still demands all three.
+    other = "T-mode-s"
+    if state.topic_exists(other):
+        state.delete_topic(other, permanent=True)
+    json.loads(m._tool_handler({"action": "create", "project": other, "core_question": "多少个？"},
+                               session_id="t-mode"))
+    shown = json.loads(m._tool_handler(
+        {"action": "protocol", "project": other, "falsifier": "效应量小于 0.2"},
+        session_id="t-mode"))
+    assert set(shown["missing_before_freeze"]) == {"estimand", "inclusion"}, shown
+
+
 class _FakeCtx:
     """Stands in for the PluginContext: the only thing used is post_message."""
 

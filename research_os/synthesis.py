@@ -30,12 +30,34 @@ _STOP = {
     "not", "but", "its", "their", "than", "then", "which", "when", "what",
     "have", "has", "had", "into", "over", "under", "does", "did", "can", "may",
     "vs", "versus", "effect", "effects", "study", "studies", "group", "groups",
+    # Negation is deliberately absent from this set. It is not a word that
+    # carries no meaning in a comparison - it is the word that decides
+    # whether two nearly identical claims agree or contradict. Dropping it
+    # would make "improved" and "did not improve" the same token bag and
+    # report a contradiction as a duplicate.
     "的", "了", "和", "与", "在", "是", "对", "有", "个", "这", "那", "也",
     "研究", "结果", "患者", "分析", "显著", "差异", "相关",
 }
 
 _WORD = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+# Phrases that flip a claim's polarity. Multi-character forms only: a bare
+# 不 turns up inside 不同 / 不仅 / 不断, which are not negations of the claim
+# at all, and a false negation flag is worse than none - it would turn every
+# ordinary pair into a reported conflict.
+_NEGATION = re.compile(
+    r"(未(?:见|能|发现|达到|显著|改善|出现)|没有(?:显著)?|无(?:显著)?(?:差异|改善|变化)"
+    r"|不(?:显著|支持|成立|改善|存在|一致)|并不|未能|not\b|no\b|never\b"
+    r"|without\b|absence\s+of|failed\s+to|did\s+not|does\s+not|was\s+not"
+    r"|were\s+not|is\s+not|are\s+not|didn't|doesn't|wasn't|weren't|isn't|aren't)",
+    re.I,
+)
+
+
+def _negated(text: str) -> bool:
+    """Whether the claim asserts an absence rather than a presence."""
+    return bool(_NEGATION.search(str(text or "")))
 
 
 def _tokens(text: str) -> set[str]:
@@ -143,6 +165,14 @@ def build_digest(
         if len(ids) > 1
     ]
 
+    # Pairs that share most of their wording. What the page cannot say is
+    # whether they agree: "干预显著改善认知" and "干预未显著改善认知" share
+    # nearly every token and mean opposite things. So the pair is labelled
+    # with what is checkable - the two claims, their sources, how much
+    # wording they share, and whether their polarity differs - and the
+    # relation is left as a question for the judgement step. A program that
+    # called this pair "near-duplicate" would be handing the reader a
+    # conclusion it is not entitled to.
     overlaps: List[Dict[str, Any]] = []
     for i in range(len(claim_rows)):
         for j in range(i + 1, len(claim_rows)):
@@ -150,16 +180,29 @@ def build_digest(
             if a["branch"] == b["branch"]:
                 continue
             score = _jaccard(_tokens(a["content"]), _tokens(b["content"]))
-            if score >= threshold:
-                overlaps.append({
-                    "score": round(score, 2),
-                    "branches": [a["branch"], b["branch"]],
-                    "a": _clip(a["content"], 120),
-                    "b": _clip(b["content"], 120),
-                    "a_source": a["source"],
-                    "b_source": b["source"],
-                })
-    overlaps.sort(key=lambda row: -row["score"])
+            if score < threshold:
+                continue
+            a_neg, b_neg = _negated(a["content"]), _negated(b["content"])
+            if a_neg != b_neg:
+                hint = "polarity_differs"
+            elif a["source"] and a["source"] == b["source"]:
+                hint = "same_source"
+            else:
+                hint = "wording_overlap"
+            overlaps.append({
+                "score": round(score, 2),
+                "branches": [a["branch"], b["branch"]],
+                "a": _clip(a["content"], 120),
+                "b": _clip(b["content"], 120),
+                "a_source": a["source"],
+                "b_source": b["source"],
+                "hint": hint,
+                "relation": "",
+            })
+    # Polarity-flipped pairs first: if two routes reached opposite
+    # conclusions about the same thing, that is the finding, and it must not
+    # be buried under a list of pairs that merely repeat each other.
+    overlaps.sort(key=lambda row: (row["hint"] != "polarity_differs", -row["score"]))
 
     narrative_at = 0.0
     try:
@@ -202,11 +245,21 @@ def _demands(digest: Dict[str, Any]) -> List[str]:
             "还是两条路线读了同一篇的不同部分"
         )
     overlaps = digest.get("overlapping_claims") or []
-    if overlaps:
-        top = overlaps[0]
+    flipped = [row for row in overlaps if row.get("hint") == "polarity_differs"]
+    if flipped:
+        top = flipped[0]
         out.append(
-            f"{len(overlaps)} 对主张几乎同义（最强一对 {top['a']} / {top['b']}，相似 {top['score']}），"
-            "要么合并，要么说清它们的差别在哪"
+            f"{len(flipped)} 对主张用词几乎一样但极性相反（如「{top['a']}」与「{top['b']}」），"
+            "程序分不出这是真冲突还是各自测的不同条件——这一条要你来判，"
+            "判完在 relation 里写清是冲突、互补还是不可比较"
+        )
+    plain = [row for row in overlaps if row.get("hint") != "polarity_differs"]
+    if plain:
+        top = plain[0]
+        out.append(
+            f"{len(plain)} 对主张用词高度重合（最强一对相似 {top['score']}），"
+            "程序只给候选：是重复、是同一份证据支撑了两个结论，还是措辞巧合，"
+            "要逐对写成支持/重复/互补/不可比较"
         )
     conflicts = digest.get("open_conflicts") or []
     if conflicts:

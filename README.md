@@ -201,9 +201,50 @@ spaces and two sentences differing by three characters would otherwise share
 no tokens at all.
 
 The digest carries `demands` — the specific things a write-back has to answer.
-The judgement stays with the agent, and a parent may not advance to `converging`
-or `updating` while a closed branch has not been synthesised: sub-projects
-finish and the parent has to say what they add up to before the next round.
+
+**A digest is not a synthesis.** A synthesis goes through three recorded
+states, and the difference is the whole point of having them:
+
+| state | what it means | how it is reached |
+|---|---|---|
+| `digest_generated` | the material was counted | `synthesize` ran |
+| `judgment_recorded` | the parent said what it now thinks | `set_state` with `narrative` or `plan` |
+| `integrated` | a claim of the parent's rests on branch evidence | a parent inference whose premise is `branch-topic:L3` |
+
+A parent may not advance to `converging` or `updating` while a closed branch
+sits at `digest_generated`: generating the digest and moving on used to pass
+the old timestamp check, which made the check decorative.
+
+**A judgement may cite what a branch found.** An inference's premise can name
+another topic's ledger as `branch-topic:L3`, and the validator reads that
+ledger — status, strength and source included — instead of asking for the
+finding to be copied up. Only the citing topic's parent, children and siblings
+may be cited; a conclusion imported from an unrelated topic looks exactly like
+one that was reasoned to.
+
+**Similar wording is not agreement.** Two claims that share most of their
+tokens are reported as a pair with `hint: wording_overlap` or, when one carries
+a negation the other does not, `hint: polarity_differs`. `relation` is left
+empty on purpose: deciding whether a pair supports, duplicates, contradicts,
+complements or cannot be compared is the judgement step, and a program that
+filled that in would be handing over a conclusion it is not entitled to.
+
+---
+
+## Telling the branches what to do next
+
+A tree whose parent only points downward is a folder. `action='directive'`
+records, per branch, `continue` / `redirect` / `pause` / `close` with the
+reason, the next question and a priority relative to the other branches.
+`action='acknowledge'` is the branch confirming it received the direction —
+because an instruction nobody confirmed is an instruction nobody read, and
+until it is confirmed it sits at the top of the branch's injected block.
+
+The loop that results is the one a long project actually needs:
+
+```
+branch produces  →  parent synthesises  →  parent directs  →  branch executes  →  synthesises again
+```
 
 ---
 
@@ -539,7 +580,7 @@ research_mode(action="claim", project="X", claim={...})
 research_mode(action="claim", project="X", claims=[{...}, {...}])
 research_mode(action="amend", project="X", claim_id="L44", strength="suggestive")
 research_mode(action="contradict", project="X", title="...", separator="...")
-research_mode(action="set_state", project="X", phase="weighing", narrative="...")
+research_mode(action="set_state", project="X", phase="synthesis", narrative="...")
 research_mode(action="set_state", project="X", parent="The-Review")
 research_mode(action="map", project="X", open_questions="Q1? | Q2?")
 research_mode(action="question", project="X", question="Q that is still open")
@@ -551,16 +592,29 @@ research_mode(action="delete", project="X")
 research_mode(action="review", project="X", verdict="redirect", review_note="...")
 research_mode(action="protocol", project="X", estimand="...",
               inclusion="A | B", falsifier="...", freeze=True)
+research_mode(action="protocol", project="X", mode="exploratory",
+              falsifier="what would make this wrong", freeze=True)
 research_mode(action="branch", project="X", route="...", why_relevant="...")
 research_mode(action="branch", project="X", branch_id="B1",
               branch_status="concluded", contribution="...")
 research_mode(action="gate", project="X", gate_reason="...")
 research_mode(action="synthesize", project="X")
+research_mode(action="directive", project="X", branch_id="B2", decision="redirect",
+              reason="...", next_question="...", priority="high")
+research_mode(action="acknowledge", project="X-B2", acknowledge_note="...")
 research_mode(action="source", project="X", source_kind="zotero",
               source_locator="ABCD1234")
 research_mode(action="library", project="X")
 research_mode(action="validate", project="X")
 ```
+
+**Not every review estimates a quantity.** A systematic review names its
+estimand, its inclusion criteria and its falsifier before it looks at a
+record. An exploratory piece asking what the shape of a relationship is cannot
+name inclusion criteria in advance without guessing, and freezing a guess
+narrows the project onto its first framing while looking rigorous. Set
+`mode="exploratory"` and the plan only has to commit to the falsifier — the
+one question that works for both kinds. `mode="systematic"` stays the default.
 
 **A round of searching usually turns up several findings at once**, and a
 tool that only accepts one leaves the agent looking for another way to

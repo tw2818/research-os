@@ -1529,8 +1529,24 @@ PROTOCOL_FILE = "protocol.json"
 
 PROTOCOL_FIELDS = (
     "estimand", "inclusion", "exclusion", "primary_outcome",
-    "falsifier", "zotero_collection", "zotero_query", "note",
+    "falsifier", "zotero_collection", "zotero_query", "note", "mode",
 )
+
+# Not every review estimates a quantity. A systematic review of a defined
+# question can name its estimand and its inclusion criteria before it looks at
+# a record; an exploratory piece asking what the shape of a relationship even
+# is cannot - the criteria would be a guess dressed as a commitment, and
+# freezing a guess makes the project look rigorous while it narrows onto the
+# first framing.
+#
+# What both kinds can commit to is what would make them wrong. So that is what
+# stays required in exploratory mode, and it is the same question the whole
+# design is built around.
+PROTOCOL_MODES = ("systematic", "exploratory")
+PROTOCOL_REQUIRED = {
+    "systematic": ("estimand", "inclusion", "falsifier"),
+    "exploratory": ("falsifier",),
+}
 
 
 def protocol_path(topic: str) -> Path:
@@ -1553,10 +1569,17 @@ def protocol_locked(topic: str) -> bool:
 
 
 def protocol_missing_fields(topic: str) -> list[str]:
-    """What still has to be said before the plan can be frozen."""
+    """What still has to be said before the plan can be frozen.
+
+    Which fields those are depends on what kind of review this is: see
+    PROTOCOL_REQUIRED. Both kinds still have to say what would refute them.
+    """
     p = read_protocol(topic)
+    mode = str(p.get("mode") or "systematic").strip().lower()
+    if mode not in PROTOCOL_MODES:
+        mode = "systematic"
     missing = []
-    for field in ("estimand", "inclusion", "falsifier"):
+    for field in PROTOCOL_REQUIRED[mode]:
         value = p.get(field)
         if isinstance(value, list):
             ok = any(str(x).strip() for x in value)
@@ -1848,6 +1871,16 @@ def would_cycle(topic: str, parent: str, limit: int = 16) -> bool:
 
 SYNTHESIS_FILE = "syntheses.json"
 
+# A digest is a pile of facts about the branches; a judgement is the parent
+# saying what they add up to. The three states exist because the first is
+# cheap and the second is the work, and without names for them the second is
+# skippable without anyone noticing.
+SYNTHESIS_PENDING = "digest_generated"      # counted, not judged
+SYNTHESIS_JUDGED = "judgment_recorded"      # narrative/plan written back
+SYNTHESIS_INTEGRATED = "integrated"         # a ledger claim rests on branch evidence
+SYNTHESIS_STATES = (SYNTHESIS_PENDING, SYNTHESIS_JUDGED, SYNTHESIS_INTEGRATED)
+SYNTHESIS_RANK = {SYNTHESIS_PENDING: 1, SYNTHESIS_JUDGED: 2, SYNTHESIS_INTEGRATED: 3}
+
 
 def synthesis_path(topic: str) -> Path:
     return topic_dir(topic) / SYNTHESIS_FILE
@@ -1865,6 +1898,7 @@ def read_syntheses(topic: str) -> dict[str, Any]:
 def append_synthesis(topic: str, record: dict[str, Any]) -> dict[str, Any]:
     data = read_syntheses(topic)
     rows = [r for r in data.get("syntheses") or [] if isinstance(r, dict)]
+    record.setdefault("state", SYNTHESIS_PENDING)
     rows.append(record)
     data["syntheses"] = rows[-40:]
     _write_json(synthesis_path(topic), data)
@@ -1874,3 +1908,188 @@ def append_synthesis(topic: str, record: dict[str, Any]) -> dict[str, Any]:
 def last_synthesis(topic: str) -> dict[str, Any]:
     rows = [r for r in read_syntheses(topic).get("syntheses") or [] if isinstance(r, dict)]
     return rows[-1] if rows else {}
+
+
+def mark_synthesis(
+    topic: str,
+    state: str,
+    *,
+    claim: str = "",
+    note: str = "",
+    only_below: bool = True,
+) -> dict[str, Any]:
+    """Advance the newest digest through the synthesis states.
+
+    A digest is not a synthesis. Counting shared sources and near-duplicate
+    claims is the part a program can do; the part that makes it a synthesis
+    is the parent deciding what it means and putting that where the ledger
+    can be checked. Without a state the difference is invisible, and a run
+    that generated a digest and moved on looks exactly like one that
+    finished.
+    """
+    if state not in SYNTHESIS_STATES:
+        raise ValueError(f"state must be one of {SYNTHESIS_STATES}")
+    data = read_syntheses(topic)
+    rows = [r for r in data.get("syntheses") or [] if isinstance(r, dict)]
+    if not rows:
+        return {}
+    last = rows[-1]
+    if only_below and SYNTHESIS_RANK.get(str(last.get("state") or ""), 0) >= SYNTHESIS_RANK[state]:
+        return last
+    last["state"] = state
+    last[f"{state}_at"] = now()
+    if claim:
+        last["judged_claim"] = claim
+    if note:
+        last["judged_note"] = note
+    data["syntheses"] = rows
+    _write_json(synthesis_path(topic), data)
+    return last
+
+
+def synthesis_ready(topic: str, branch_ids: list[str] | None = None) -> dict[str, Any]:
+    """Is there a synthesis that actually judged, rather than only counted?
+
+    `branch_ids` narrows the question to the branches that closed during the
+    current round: a digest that predates the branch it should account for
+    says nothing about it.
+    """
+    last = last_synthesis(topic)
+    if not last:
+        return {"ok": False, "state": "", "why": "还没有做过 synthesize"}
+    state = str(last.get("state") or SYNTHESIS_PENDING)
+    if branch_ids:
+        covered = {str(b) for b in (last.get("branches") or [])}
+        missing = [b for b in branch_ids if b not in covered]
+        if missing:
+            return {
+                "ok": False,
+                "state": state,
+                "why": f"最近一次综合没有覆盖 {'、'.join(missing)}，它们是之后才收的",
+            }
+    if SYNTHESIS_RANK.get(state, 0) < SYNTHESIS_RANK[SYNTHESIS_JUDGED]:
+        return {
+            "ok": False,
+            "state": state,
+            "why": "最近一次只生成了摘要，父课题还没写回判断",
+        }
+    return {"ok": True, "state": state, "why": ""}
+
+
+# --------------------------------------------------------------------------
+# what the parent was told to do next
+# --------------------------------------------------------------------------
+#
+# A parent that can only speak through its own `plan` has no way to reach a
+# branch: the branch reads the parent's narrative, nods, and continues with
+# whatever it was already doing. The loop is only closed when the parent can
+# say, per branch, keep going / change direction / stop / we are done, and why.
+#
+# The directive lives on the branch row so there is one place that holds the
+# relationship. The child acknowledges it in its own voice - an instruction
+# nobody has confirmed is an instruction nobody has read.
+
+
+DIRECTIVE_DECISIONS = ("continue", "redirect", "pause", "close")
+DIRECTIVE_PRIORITIES = ("high", "normal", "low")
+
+
+def set_directive(
+    topic: str,
+    branch_id: str,
+    *,
+    decision: str,
+    reason: str,
+    next_question: str = "",
+    priority: str = "normal",
+) -> dict[str, Any]:
+    """Record what the parent wants this branch to do next.
+
+    A new directive clears the acknowledgement: it is a different instruction,
+    and the old "received" cannot speak for it.
+    """
+    decision = str(decision or "").strip().lower()
+    if decision not in DIRECTIVE_DECISIONS:
+        raise ValueError(f"decision must be one of {DIRECTIVE_DECISIONS}")
+    priority = str(priority or "normal").strip().lower() or "normal"
+    if priority not in DIRECTIVE_PRIORITIES:
+        raise ValueError(f"priority must be one of {DIRECTIVE_PRIORITIES}")
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise ValueError("reason is required: a redirect with no reason is just a new opinion")
+    data = read_branches(topic)
+    rows = [b for b in data.get("branches") or [] if isinstance(b, dict)]
+    hit: dict[str, Any] = {}
+    for row in rows:
+        if str(row.get("id") or "") == str(branch_id or "").strip():
+            row["directive"] = {
+                "decision": decision,
+                "reason": reason,
+                "next_question": " ".join(str(next_question or "").split()),
+                "priority": priority,
+                "at": now(),
+                "acknowledged_at": None,
+                "acknowledged_note": "",
+            }
+            hit = row
+            break
+    if hit:
+        data["branches"] = rows
+        write_branches(topic, data)
+    return hit
+
+
+def read_directive(topic: str, branch_id: str) -> dict[str, Any]:
+    row = next(
+        (b for b in list_branches(topic) if str(b.get("id") or "") == str(branch_id or "")),
+        {},
+    )
+    directive = row.get("directive")
+    return dict(directive) if isinstance(directive, dict) else {}
+
+
+def child_directive(child_topic: str) -> dict[str, Any]:
+    """The instruction waiting for this child from its parent, if any."""
+    m = read_map(child_topic)
+    parent = str(m.get("parent") or "").strip()
+    if not parent:
+        return {}
+    row = next(
+        (b for b in list_branches(parent) if str(b.get("child") or "") == child_topic),
+        {},
+    )
+    directive = row.get("directive")
+    if not isinstance(directive, dict) or not directive:
+        return {}
+    out = dict(directive)
+    out["parent"] = parent
+    out["branch"] = str(row.get("id") or "")
+    out["branch_status"] = str(row.get("status") or "")
+    return out
+
+
+def acknowledge_directive(child_topic: str, *, note: str = "") -> dict[str, Any]:
+    """Mark the parent's instruction as received, from the child's side."""
+    m = read_map(child_topic)
+    parent = str(m.get("parent") or "").strip()
+    if not parent:
+        raise ValueError("this topic has no parent, so there is no directive to acknowledge")
+    data = read_branches(parent)
+    rows = [b for b in data.get("branches") or [] if isinstance(b, dict)]
+    hit: dict[str, Any] = {}
+    for row in rows:
+        if str(row.get("child") or "") != child_topic:
+            continue
+        directive = row.get("directive")
+        if not isinstance(directive, dict) or not directive:
+            raise ValueError("the parent has not sent a directive for this branch")
+        directive["acknowledged_at"] = now()
+        directive["acknowledged_note"] = " ".join(str(note or "").split())
+        row["directive"] = directive
+        hit = row
+        break
+    if not hit:
+        raise ValueError("no branch row in the parent points at this topic")
+    data["branches"] = rows
+    write_branches(parent, data)
+    return hit.get("directive") or {}

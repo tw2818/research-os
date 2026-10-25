@@ -21,6 +21,7 @@ try:
     # `research_os_impl.*` so they cannot collide with another plugin's
     # `state.py` and cannot go stale behind a reloaded entry module.
     from research_os_impl.state import (
+        child_directive,
         read_claims,
         read_contradictions,
         read_map,
@@ -33,6 +34,7 @@ try:
 except ImportError:
     try:
         from .state import (
+            child_directive,
             read_claims,
             read_contradictions,
             read_map,
@@ -44,6 +46,7 @@ except ImportError:
         )
     except ImportError:  # loaded flat inside the Hermes plugin directory
         from state import (  # type: ignore[no-redef]
+            child_directive,
             read_claims,
             read_contradictions,
             read_map,
@@ -302,7 +305,7 @@ def phase_output(phase: str) -> str:
 # Kept here because the tool description and this must not drift apart, and
 # because the reference implementation uses it in its own error messages.
 CLAIM_RULES = """记进账本时用 research_mode(action='claim', project='<课题>', claim={...})：
-observation 事实(要文献)｜ report 转述(要文献)｜ inference 推论(premises 填行号，强度不超最弱前提)｜ hypothesis 假设(无来源但要留作假设)。
+observation 事实(要文献)｜ report 转述(要文献)｜ inference 推论(premises 填行号，强度不超最弱前提；父课题可引子课题，写「子课题:L3」)｜ hypothesis 假设(无来源但要留作假设)。
 没来源的别写成事实。"""
 
 # How to think about the question, before answering it.
@@ -499,6 +502,17 @@ def _routes(topic: str) -> list[str]:
         contribution = _short(b.get("contribution"), 60)
         if contribution:
             out.append(f"- {b.get('id')} 已收束，贡献：{contribution}")
+    # Which branches have not picked up the direction this topic gave them.
+    # A directive nobody acknowledged is a directive nobody has read, and the
+    # parent has no way to tell that from the branch agreeing.
+    unread = [
+        str(b.get("id") or "") for b in rows
+        if isinstance(b.get("directive"), dict)
+        and b["directive"]
+        and not b["directive"].get("acknowledged_at")
+    ]
+    if unread:
+        out.append(f"下发过但子课题还没确认：{'、'.join(unread)}")
     if len(open_rows) > 2:
         out.append("（同时开着三条以上路线时，先收掉一条再开新的。）")
     # The gate's last word, in the phase that has to earn its way past it.
@@ -518,6 +532,38 @@ def _routes(topic: str) -> list[str]:
                if verdict == "revise" else "")
         )
     return out
+
+
+def _parent_directive(topic: str) -> list[str]:
+    """What the parent told this branch to do, until the branch receives it.
+
+    It sits above the standing because it can change what this round is for.
+    Once acknowledged it is history, not instruction, and it drops out of the
+    block instead of being repeated every turn.
+    """
+    try:
+        d = child_directive(topic)
+    except Exception:
+        return []
+    if not d:
+        return []
+    decision = {
+        "continue": "继续", "redirect": "改向", "pause": "暂停", "close": "收尾",
+    }.get(str(d.get("decision") or ""), str(d.get("decision") or ""))
+    bits = [f"父课题（{d.get('parent')}）对这条例线（{d.get('branch')}）的指示：{decision}"]
+    if d.get("next_question"):
+        bits.append(f"要检验的是：{_short(d.get('next_question'), 70)}")
+    if d.get("reason"):
+        bits.append(f"理由：{_short(d.get('reason'), 70)}")
+    bits.append(f"优先级：{d.get('priority') or 'normal'}")
+    if d.get("acknowledged_at"):
+        bits.append("（已确认）")
+    else:
+        bits.append(
+            "（还没确认：先调 research_mode(action='acknowledge', "
+            f"project='{topic}', acknowledge_note='<这一轮怎么对着它做，或为什么不做>')）"
+        )
+    return [" ｜ ".join(bits)]
 
 
 def _frame(topic: str, m: dict[str, Any] | None = None) -> list[str]:
@@ -746,6 +792,10 @@ def build_research_block(topic: str, config: dict[str, Any] | None = None) -> st
 
     lines = [f"[Research OS · {topic}]"]
     lines.append(f"核心问题：{m.get('core_question', '')}")
+    # A direction from the parent comes before anything this topic thinks it
+    # is doing: it is the one line that can make the rest of the block
+    # obsolete.
+    lines.extend(_parent_directive(topic))
     # Where the project stands comes before what is known. The goal, the
     # phase and the current task are what the turn is for; the evidence is
     # what the turn works with.

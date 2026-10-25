@@ -54,6 +54,43 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.10.0] — 2026-10-25
+
+- **A judgement may cite a branch's ledger.** An inference's premise can be
+  `branch-topic:L3`, and the validator reads that ledger — status, strength,
+  source — instead of asking for the finding to be copied upward. Only the
+  citing topic's parent, children and siblings may be cited: the same
+  reference from an unrelated topic is refused (`foreign_premise`), because a
+  conclusion imported from a stranger's ledger looks exactly like one that
+  was reasoned to. The validator reports every borrowed premise in
+  `cross_premises`, and the borrowed premise's strength participates in the
+  "not stronger than its weakest premise" rule.
+- **A digest is not a synthesis.** Syntheses now carry a state:
+  `digest_generated` → `judgment_recorded` (the parent wrote narrative/plan
+  back) → `integrated` (a parent claim's premise points into a branch the
+  digest covered). A parent may not enter `converging`/`updating` while a
+  closed branch sits at `digest_generated` — the old guard compared
+  timestamps, so calling `synthesize` and moving on passed it.
+- **Similar wording is not agreement.** Claim pairs are now reported with a
+  `hint` (`wording_overlap` / `same_source` / `polarity_differs`) and an
+  empty `relation` for the judgement step to fill. Negation detection pairs
+  with the tokeniser, and `not` is deliberately absent from the stopword list:
+  dropping it made "improved" and "did not improve" the same token bag, which
+  reported a contradiction as a duplicate. Polarity-flipped pairs sort first
+  — if two routes reached opposite conclusions, that is the finding.
+- **The parent can direct a branch.** `action='directive'` records
+  continue / redirect / pause / close per branch, with the reason, the next
+  question and a priority; `action='acknowledge'` is the branch confirming it
+  received it. Until acknowledged, the directive sits at the top of the
+  branch's injected block. Without this the tree only flows upward: a branch
+  reports, the parent nods, and the branch carries on with whatever it was
+  already doing.
+- **Exploratory reviews are not forced into a systematic protocol.**
+  `mode="exploratory"` requires only the falsifier before freezing, instead
+  of estimand + inclusion + falsifier. Freezing a guessed inclusion criterion
+  is worse than an honest open question, and the falsifier is the one
+  commitment that works for both kinds of review.
+
 ## [0.9.0] — 2026-10-25
 
 - **The parent synthesises its branches, or it does not close the round.**

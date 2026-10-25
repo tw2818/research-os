@@ -182,6 +182,11 @@ TOOL_SCHEMA: dict[str, Any] = {
         "issues pinned to a specific claim or route. Leaving 收敛 for 更新科研状态 needs a "
         "verdict of pass or pass_with_caveat; after gate_max_rounds the gate lets the work "
         "through with the caveat recorded. "
+        "ACTION 'directive' is a parent telling one branch what to do next (continue / "
+        "redirect / pause / close, with the reason and the next question); ACTION "
+        "'acknowledge' is that branch confirming it received the direction. Without this "
+        "the tree only flows upward: a branch reports, the parent nods, and the branch "
+        "carries on with whatever it was already doing. "
         "ACTION 'synthesize' is for a parent topic: it reads every branch's own state and returns a "
         "digest of what only the parent can say - sources two branches both rely on, pairs of "
         "claims that say nearly the same thing, conflicts still open, branches that closed after the "
@@ -225,7 +230,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "contradict", "question", "hypothesis", "map",
                     "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
-                    "protocol", "branch", "gate", "synthesize",
+                    "protocol", "branch", "gate", "synthesize", "directive", "acknowledge",
                 ],
                 "description": "What to do.",
             },
@@ -268,7 +273,63 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "For action 'set_state': redefine the question this topic "
                     "is answering. A project that runs long sometimes finds "
                     "the question is not the one worth answering; the old one "
-                    "is kept with the reason."
+                    "is kept with the reason. Requires question_reason."
+                ),
+            },
+            "question_reason": {
+                "type": "string",
+                "description": (
+                    "Why the core question changed. Required by 'set_state' "
+                    "and by 'map' whenever core_question is different from "
+                    "the current one - the old question stays in "
+                    "question_history and this is what makes the change "
+                    "readable later."
+                ),
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["systematic", "exploratory"],
+                "description": (
+                    "For action 'protocol': what kind of review this is. "
+                    "'systematic' (the default) has to name its estimand, its "
+                    "inclusion criteria and its falsifier before it searches. "
+                    "'exploratory' commits only to the falsifier - an "
+                    "exploratory question cannot name its inclusion criteria "
+                    "in advance without guessing, and a frozen guess is worse "
+                    "than an honest open question."
+                ),
+            },
+            "decision": {
+                "type": "string",
+                "enum": ["continue", "redirect", "pause", "close"],
+                "description": (
+                    "For action 'directive': what the parent wants this "
+                    "branch to do next. 'continue' keeps the route, "
+                    "'redirect' changes what it is testing, 'pause' stops it "
+                    "for now, 'close' ends it."
+                ),
+            },
+            "next_question": {
+                "type": "string",
+                "description": (
+                    "For action 'directive': the specific thing the branch "
+                    "should test next. A redirect with no next question "
+                    "leaves the branch free to keep doing what it was doing."
+                ),
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["high", "normal", "low"],
+                "description": (
+                    "For action 'directive': this branch's priority relative "
+                    "to the others under the same parent."
+                ),
+            },
+            "acknowledge_note": {
+                "type": "string",
+                "description": (
+                    "For action 'acknowledge': what the branch says it will "
+                    "do about the parent's directive, or why it will not."
                 ),
             },
             "estimand": {
@@ -641,7 +702,11 @@ TOOL_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": (
                             "Claim ids this rests on, separated by ' ' (inference only). "
-                            "Example: 'L1 L2'."
+                            "Example: 'L1 L2'. A premise may name another topic's "
+                            "ledger as 'child-topic:L3' — that is how a parent "
+                            "topic's judgement rests on what its branches found. "
+                            "Only the parent, the children and the siblings of "
+                            "this topic may be cited."
                         ),
                     },
                     "source": {
@@ -851,6 +916,51 @@ def _notify_transitions(before: dict[str, Any], args: dict[str, Any], raw: str) 
         total = payload.get("total")
         mark = {"pass": "放行", "revise": "要改", "pass_with_caveat": "带 caveat 放行"}.get(verdict, verdict)
         _notify(f"科研 · {topic} · 审稿 {mark}（{total}/10，第 {payload.get('round')} 轮）")
+
+
+def _mark_integrated(topic: str, row: dict[str, Any]) -> None:
+    """A parent claim resting on branch evidence completes the synthesis.
+
+    `judgment_recorded` says the parent wrote down what it now thinks.
+    `integrated` says a ledger row of the parent's own rests on a claim from
+    a branch - which is the difference between a paragraph about the routes
+    and a conclusion the routes support. Nothing else is allowed to set this
+    state: it is read off the premises the parent actually recorded.
+    """
+    if str(row.get("kind") or "") != "inference":
+        return
+    premises = str(row.get("premises") or "")
+    if not premises:
+        return
+    last = _state.last_synthesis(topic)
+    if not last:
+        return
+    # The digest records branch ids; the premise names the child topic that
+    # branch created. Both are the same relationship seen from two ends, so
+    # the coverage test accepts either.
+    covered_ids = {str(b) for b in (last.get("branches") or [])}
+    covered = set(covered_ids)
+    for row in _state.list_branches(topic):
+        if str(row.get("id") or "") in covered_ids:
+            child = str(row.get("child") or "").strip()
+            if child:
+                covered.add(child)
+    for ref in premises.replace(",", " ").split():
+        src, _cid = _validate._split_ref(ref)
+        if not src:
+            continue
+        # Only branches the last digest actually looked at. A premise
+        # pointing at a topic the digest never covered cannot make that
+        # digest count as integrated.
+        if covered and src not in covered:
+            continue
+        _state.mark_synthesis(
+            topic,
+            _state.SYNTHESIS_INTEGRATED,
+            claim=str(row.get("id") or ""),
+            note=f"premise {ref}",
+        )
+        return
 
 
 def _tool_handler(args: dict[str, Any], **kwargs: Any) -> str:
@@ -1138,7 +1248,9 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     # it was silently dropped - the batch reported fewer
                     # rows than it was given and said nothing about why.
                     try:
-                        recorded.append(_state.append_claim(project, one))
+                        appended = _state.append_claim(project, one)
+                        _mark_integrated(project, appended)
+                        recorded.append(appended)
                     except Exception as exc:
                         rejected.append({
                             "claim": {
@@ -1178,6 +1290,7 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     ),
                 })
             row = _state.append_claim(project, _expand_source(project, claim))
+            _mark_integrated(project, row)
             return ok({"recorded": row})
 
         if action == "amend":
@@ -1382,6 +1495,92 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 ),
             })
 
+        if action == "directive":
+            # The parent tells a branch what to do next. Without this the
+            # tree only flows upward: the branch reports, the parent nods,
+            # and the branch carries on with whatever it was already doing.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            branch_id = str(args.get("branch_id") or "").strip()
+            decision = str(args.get("decision") or "").strip().lower()
+            reason = " ".join(str(args.get("reason") or "").split())
+            next_question = " ".join(str(args.get("next_question") or "").split())
+            priority = str(args.get("priority") or "normal").strip().lower() or "normal"
+            if not branch_id:
+                routes = _state.list_branches(project)
+                if not routes:
+                    return fail(f"「{project}」还没有分支，没有可以下发的方向。")
+                return fail(
+                    "branch_id is required. 现有的路线：" + "、".join(
+                        f"{b.get('id')}（{str(b.get('route') or '')[:24]}）" for b in routes
+                    )
+                )
+            if decision and decision not in _state.DIRECTIVE_DECISIONS:
+                return fail("decision 只能是：" + "、".join(_state.DIRECTIVE_DECISIONS))
+            if not reason:
+                return fail(
+                    "reason 必填：不写理由的改向只是换了个意见，子课题没法判断该听哪一句。"
+                )
+            try:
+                row = _state.set_directive(
+                    project,
+                    branch_id,
+                    decision=decision or "continue",
+                    reason=reason,
+                    next_question=next_question,
+                    priority=priority,
+                )
+            except ValueError as exc:
+                return fail(str(exc))
+            if not row:
+                return fail(f"「{project}」没有 {branch_id} 这条路线。")
+            label = {
+                "continue": "继续", "redirect": "改向", "pause": "暂停", "close": "收尾",
+            }.get(decision, decision)
+            _notify(f"科研 · {project} · 给 {branch_id} 的指示：{label}")
+            return ok({
+                "topic": project,
+                "branch": row,
+                "directive": row.get("directive") or {},
+                "next": (
+                    f"指示出去了（{label}）。{branch_id} 那一侧下一次开会看到它，"
+                    f"确认之后才有 acknowledged_at——没确认的指示等于没读过。"
+                ),
+            })
+
+        if action == "acknowledge":
+            # The child's side of the same loop. The instruction is not
+            # delivered because it was written; it is delivered when the
+            # branch says it received it and what it is going to do about it.
+            child = project
+            if not child:
+                return fail("project is required (the branch topic acknowledging)")
+            if not _state.topic_exists(child):
+                return fail(f"no such topic: {child!r}")
+            note = " ".join(str(args.get("acknowledge_note") or args.get("note") or "").split())
+            pending = _state.child_directive(child)
+            if not pending:
+                return fail(
+                    f"「{child}」的父课题还没有下发指示，没有要确认的东西。"
+                )
+            try:
+                directive = _state.acknowledge_directive(child, note=note)
+            except ValueError as exc:
+                return fail(str(exc))
+            _notify(f"科研 · {pending.get('parent')} · {pending.get('branch')} 已确认新方向")
+            return ok({
+                "topic": child,
+                "parent": pending.get("parent"),
+                "branch": pending.get("branch"),
+                "directive": directive,
+                "note": (
+                    "确认记下了。这一轮的工作要对着 next_question 摆，"
+                    "不做的话说清为什么不做。"
+                ),
+            })
+
         if action == "gate":
             # The stage review. A separate call to a model that did not write
             # this, because an agent reviewing its own last move always finds
@@ -1523,11 +1722,22 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 "open_conflicts": digest.get("open_conflicts"),
                 "unsynthesised": digest.get("unsynthesised"),
                 "demands": digest.get("demands"),
+                "state": _state.SYNTHESIS_PENDING,
+                "states": {
+                    _state.SYNTHESIS_PENDING: "摘要生成了，判断还没写",
+                    _state.SYNTHESIS_JUDGED: "父课题把判断写回了 narrative / plan",
+                    _state.SYNTHESIS_INTEGRATED: "父课题有一条主张，前提指向分支的证据",
+                },
                 "next": (
-                    "综合的料在这了，判断还是你的。把这轮结论写回父课题："
-                    "set_state 带 narrative（现在的判断变了什么）和 plan（下一步），"
-                    "再记一条 inference 主张，前提是各分支的主张。"
-                    "写完之后再推进发散或找证据。"
+                    "料在这了，判断还是你的，而且这一步有记录：现在只到 "
+                    "digest_generated。把结论写回父课题才到 judgment_recorded——"
+                    "set_state 带 narrative（现在认为什么变了）和 plan（下一步）。"
+                    "再有把握一条，记一条 inference，前提直接写「分支课题:L3」"
+                    "（例：" + "、".join(
+                        f"{b.get('child')}:L1" for b in branches[:2] if b.get("child")
+                    ) + "），那才到 integrated——父课题的判断挂在分支的证据上。"
+                    "词面近似的那几对，要逐对判成支持/重复/冲突/互补/不可比较，"
+                    "程序只负责把它们找出来。"
                 ),
             }
             return ok(payload)
@@ -1558,6 +1768,10 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     ]
                 if value != current.get(field):
                     changes[field] = value
+            if "mode" in changes:
+                if str(changes["mode"]).strip().lower() not in _state.PROTOCOL_MODES:
+                    return fail("mode 只能是：" + "、".join(_state.PROTOCOL_MODES))
+                changes["mode"] = str(changes["mode"]).strip().lower()
             freeze = bool(args.get("freeze"))
             reason = str(args.get("unfreeze_reason") or "").strip()
             locked = bool(current.get("locked"))
@@ -1582,9 +1796,14 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 if missing:
                     names = {"estimand": "估计量（estimated quantity）", "inclusion": "纳入标准",
                              "falsifier": "否证条件（什么结果会推翻它）"}
+                    mode = str(_state.read_protocol(project).get("mode") or "systematic")
+                    tail = (
+                        "探索型方案只要求否证条件，但这一条不能空。"
+                        if mode == "exploratory"
+                        else "缺一样，冻结的就是一个方向，不是一次检验。"
+                    )
                     return fail(
-                        "冻结前还缺：" + "、".join(names.get(m) or m for m in missing)
-                        + "。这三样缺一样，冻结的就是一个方向，不是一次检验。"
+                        "冻结前还缺：" + "、".join(names.get(m) or m for m in missing) + "。" + tail
                     )
                 latest = _state.lock_protocol(project, locked=True)
             return report_protocol(project, latest)
@@ -1713,20 +1932,30 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 # never said what it added up to.
                 if key in ("converging", "updating"):
                     routes = _state.list_branches(project)
-                    pending = [
+                    closed = [
                         str(b.get("id") or "")
                         for b in routes
                         if str(b.get("status") or "") in ("concluded", "merged")
-                        and float(b.get("closed_at") or 0)
-                        > float(_state.last_synthesis(project).get("at") or 0)
                     ]
-                    if pending:
-                        return fail(
-                            f"「{project}」有 {len(pending)} 条分支（{'、'.join(pending)}）收掉之后"
-                            f"父课题还没综合过。先 action='synthesize' 看跨分支的共用证据、"
-                            f"近似主张、还没分开的冲突，再把判断写回 narrative 和 plan——"
-                            f"分支干完了活，父课题得说清合起来是什么。"
-                        )
+                    if closed:
+                        # Two failures this catches. The old check compared
+                        # the digest's timestamp with when each branch
+                        # closed, so calling synthesize and moving on passed
+                        # - the digest was generated, the judgement never
+                        # made. And a digest that merely counted says nothing
+                        # about what the branches add up to; the state has to
+                        # reach "judgment recorded" for the round to count.
+                        ready = _state.synthesis_ready(project, closed)
+                        if not ready["ok"]:
+                            return fail(
+                                f"「{project}」的收敛还差一步：{ready['why']}。"
+                                f"先 action='synthesize' 拿到跨分支的共用证据、近似主张和"
+                                f"还开着的冲突，然后把判断写回父课题——"
+                                f"set_state 带 narrative（现在认为什么）和 plan（下一步），"
+                                f"再有把握就记一条 inference，前提直接指向分支的主张"
+                                f"（写作「分支课题:L3」）。"
+                                f"分支干完了活，父课题得说清合起来是什么。"
+                            )
             before = _state.read_phase(project)
             m = _state.write_state(
                 project,
@@ -1747,6 +1976,12 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
             # link, says nothing about where the work is going now, and
             # lifting the pause for it makes `pause` a state a call clears
             # rather than a decision the project has to meet.
+            # Writing the narrative back is the judgement the digest was
+            # waiting for: the digest counted, this decides. Recording the
+            # state here is what makes "generated a digest" and "finished the
+            # synthesis" two different things on the record.
+            if str(narrative or "").strip() or str(plan or "").strip():
+                _state.mark_synthesis(project, _state.SYNTHESIS_JUDGED)
             was_paused = _state.topic_is_paused(project)
             answers_pause = any(
                 value is not None and str(value).strip()

@@ -927,6 +927,32 @@ def _render_routes(topic: str, *, obsidian: bool) -> str:
     return "\n".join(lines)
 
 
+def _render_directives(topic: str, *, obsidian: bool) -> str:
+    """What this topic told each branch to do, and whether it was received.
+
+    The parent's side of the loop. A page that lists the branches but not the
+    instructions is a page about a folder, not about a project with a
+    direction.
+    """
+    rows = _safe(lambda: state.list_branches(topic), [])
+    sent = [b for b in rows if isinstance(b.get("directive"), dict) and b["directive"]]
+    if not sent:
+        return ""
+    label = {"continue": "继续", "redirect": "改向", "pause": "暂停", "close": "收尾"}
+    lines = ["## 对各路线的指示", ""]
+    for b in sent:
+        d = b["directive"]
+        ack = "已确认" if d.get("acknowledged_at") else "未确认"
+        head = f"- **{b.get('id')}** {label.get(str(d.get('decision') or ''), d.get('decision'))}（{ack}，优先级 {d.get('priority') or 'normal'}）"
+        lines.append(head)
+        if d.get("reason"):
+            lines.append(f"  - 为什么：{d.get('reason')}")
+        if d.get("next_question"):
+            lines.append(f"  - 要检验的：{d.get('next_question')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_synthesis(topic: str, *, obsidian: bool) -> str:
     """What the parent learned from its branches, on the parent's page.
 
@@ -948,7 +974,16 @@ def _render_synthesis(topic: str, *, obsidian: bool) -> str:
         ]
         return "\n".join(lines)
     last = records[-1]
-    lines += [f"最近一次综合：{_fmt_ts(last.get('at'))}，覆盖 {len(last.get('branches') or [])} 条路线。", ""]
+    state_label = {
+        "digest_generated": "只生成了摘要，判断还没写回",
+        "judgment_recorded": "父课题写回了判断",
+        "integrated": "父课题有一条主张，前提指向分支的证据",
+    }.get(str(last.get("state") or ""), str(last.get("state") or ""))
+    lines += [
+        f"最近一次综合：{_fmt_ts(last.get('at'))}，覆盖 {len(last.get('branches') or [])} 条路线。",
+        f"状态：{state_label}",
+        "",
+    ]
     digest = last.get("digest") or {}
     shared = digest.get("shared_sources") or []
     if shared:
@@ -1099,7 +1134,13 @@ def render_topic(
     except OSError:
         existing = ""
     if existing:
-        extra = _render_routes(topic, obsidian=obsidian) + "\n" + _render_synthesis(topic, obsidian=obsidian)
+        extra = (
+            _render_routes(topic, obsidian=obsidian)
+            + "\n"
+            + _render_directives(topic, obsidian=obsidian)
+            + "\n"
+            + _render_synthesis(topic, obsidian=obsidian)
+        )
         _w(p, existing.rstrip("\n") + "\n\n" + extra.rstrip("\n") + "\n")
     else:
         _w(p, _render_routes(topic, obsidian=obsidian))

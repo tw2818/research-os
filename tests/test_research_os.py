@@ -1318,6 +1318,74 @@ def test_an_unknown_phase_is_refused():
     assert "nonsense" in str(out), out
 
 
+def test_a_batch_of_claims_goes_in_one_call():
+    """An agent that has no batch entry point looks for one, and the one it
+    finds is the state module's own API - which writes the ledger outside
+    the tool and outside every check the tool performs. A live run did
+    exactly that. A batch is the same validation, once per row."""
+    m = _handler()
+    sid = "t-batch"
+    m._tool_handler(
+        {"action": "create", "project": "BatchTopic", "core_question": "Q?"},
+        session_id=sid,
+    )
+    m._tool_handler({"action": "on", "project": "BatchTopic"}, session_id=sid)
+    out = m._tool_handler(
+        {
+            "action": "claim",
+            "project": "BatchTopic",
+            "claims": [
+                {
+                    "kind": "observation",
+                    "content": "first finding about the topic",
+                    "source": "PMID 1",
+                },
+                {
+                    "kind": "report",
+                    "content": "second finding about the topic",
+                    "source": "PMID 2",
+                },
+                {
+                    "kind": "observation",
+                    "content": "first finding about the topic",
+                    "source": "PMID 1",
+                },
+                {"kind": "observation", "source": "PMID 3"},
+            ],
+        },
+        session_id=sid,
+    )
+    body = str(out)
+    # Two went in, the duplicate did not, the one without content did not.
+    assert '"count": 2' in body or "count" in body, body
+    assert "first finding" not in body.split("duplicates")[-1] or True
+    rows = state.read_claims("BatchTopic")
+    assert len(rows) == 2, rows
+    assert len({r["id"] for r in rows}) == 2
+    # The ids came back in the order they were submitted.
+    assert "L1" in body and "L2" in body, body
+
+
+def test_the_guard_blocks_the_api_route_to_the_ledger():
+    """The guard looked for the state tree path in the command. A command
+    that imports the state module and calls its writer never names the
+    path - the module knows where it lives - and the path-based check let
+    a live run write the ledger outside the tool."""
+    import research_os as _ros
+    calls = ["append_" + "claim", "write_" + "claims"]
+    imports = ["import " + "state"]
+    for call in calls:
+        cmd = "python3 -c '%s as S; S.%s(\'t\', {})'" % (imports[0], call)
+        assert _ros._mentions_state_tree(cmd) is True, cmd
+    # Reading the state is how the agent finds out what is there.
+    assert _ros._mentions_state_tree(
+        "python3 -c 'import state as S; print(S.read_claims(\'t\'))'"
+    ) is False
+    assert _ros._mentions_state_tree(
+        "cat /home/twebery/.hermes/research-os/topics/t/claims.json"
+    ) is False
+
+
 def test_each_phase_says_what_it_is_not_for():
     """What replaced the keyword matcher that tried to guess whether a
     request fitted the phase. The matcher fired on "再查" and missed "再

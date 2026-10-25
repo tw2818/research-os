@@ -206,7 +206,7 @@ TURN_DEMAND = """这轮要有新东西，别只复述已有内容。至少做到
 提出或改写一个竞争解释｜说出区分两个解释的观察｜指出一个看着成立其实不成立的推论｜
 关掉一个待解问题｜明确说清这里无法定论｜新增一条带来源的断言。
 做完整之后用 research_mode 记下来，例如 research_mode(action='claim', project='<课题>', claim={...})
-（提解释用 action='contradict'，关问题用 action='question'，提假设用 action='hypothesis'）。"""
+一次查出几条就一次记完：claims=[{...},{...}]，不用一条一个调用。\n（提解释用 action='contradict'，关问题用 action='question'，提假设用 action='hypothesis'）。"""
 
 SCOPE_RULE = """如果用户这轮要的是操作（转格式、导入、装东西、改代码），直接做，不要讨论研究意义。
 只有用户问研究问题时才按上面的四类断言来写。"""

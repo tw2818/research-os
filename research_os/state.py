@@ -553,6 +553,9 @@ def write_state(
         m[MAP_PARENT] = str(parent).strip()
     if plan is not None:
         m[MAP_PLAN] = str(plan).strip()
+        # When the plan last moved. A directive that was acknowledged and
+        # then not followed shows up here as a plan that did not change.
+        m["plan_at"] = now()
     if review_every is not None:
         over = m.get("review_every") or {}
         if not isinstance(over, dict):
@@ -1532,20 +1535,33 @@ PROTOCOL_FIELDS = (
     "falsifier", "zotero_collection", "zotero_query", "note", "mode",
 )
 
-# Not every review estimates a quantity. A systematic review of a defined
-# question can name its estimand and its inclusion criteria before it looks at
-# a record; an exploratory piece asking what the shape of a relationship even
-# is cannot - the criteria would be a guess dressed as a commitment, and
-# freezing a guess makes the project look rigorous while it narrows onto the
-# first framing.
+# Not every review estimates a quantity, and not every review tests a
+# hypothesis. There are three kinds, and they have different things to
+# commit to:
 #
-# What both kinds can commit to is what would make them wrong. So that is what
-# stays required in exploratory mode, and it is the same question the whole
-# design is built around.
-PROTOCOL_MODES = ("systematic", "exploratory")
+#   systematic   a defined question with a defined quantity. Name the
+#                estimand, the inclusion criteria and the falsifier.
+#   exploratory  comparing explanations - the point is to tell rival
+#                readings apart, so a falsifier is the commitment.
+#   mapping      building the map of an area: "what is known here, and
+#                where are the gaps". There is no claim to refute yet, and
+#                demanding one produces a formal sentence that refutes
+#                nothing. What it can commit to is its scope.
+#
+# Requiring a falsifier from a mapping task is the failure of a system
+# that has one shape of rigour and applies it to everything: the agent
+# writes down a falsifier to get past the gate, and the gate has taught it
+# to write down things that are not true.
+PROTOCOL_MODES = ("systematic", "exploratory", "mapping")
 PROTOCOL_REQUIRED = {
     "systematic": ("estimand", "inclusion", "falsifier"),
     "exploratory": ("falsifier",),
+    "mapping": ("inclusion",),
+}
+PROTOCOL_MODE_LABELS = {
+    "systematic": "系统综述：估计量 + 纳入标准 + 否证条件",
+    "exploratory": "探索性比较：否证条件",
+    "mapping": "领域梳理：范围（把什么梳理清楚）",
 }
 
 
@@ -1947,6 +1963,166 @@ def mark_synthesis(
     return last
 
 
+def synthesis_state(topic: str) -> dict[str, Any]:
+    """The state of the newest synthesis, recomputed from what is there.
+
+    A remembered state can be wrong: a claim can be amended, a premise can
+    stop resolving, a branch can close after the digest. So the third state
+    is not a flag somebody set - it is a question asked of the current
+    ledger: does a claim of this parent rest on a branch claim that exists,
+    is verified, and is no stronger than that premise?
+
+    `integrated` therefore cannot be reached by naming an id that does not
+    exist, and it lapses when the evidence under it changes. The stored
+    state is corrected when the recomputed one differs, so the record on
+    disk never claims more than the ledger supports.
+    """
+    last = last_synthesis(topic)
+    if not last:
+        return {"state": "", "ok": False, "why": "还没有做过 synthesize", "record": {}}
+    state_name = str(last.get("state") or SYNTHESIS_PENDING)
+    if SYNTHESIS_RANK.get(state_name, 0) < SYNTHESIS_RANK[SYNTHESIS_JUDGED]:
+        return {
+            "state": state_name,
+            "ok": False,
+            "why": "最近一次只生成了摘要，父课题还没写回判断",
+            "record": last,
+        }
+    # The digest's branches, as the child topics they created.
+    covered: set[str] = set()
+    for row in list_branches(topic):
+        child = str(row.get("child") or "").strip()
+        if child:
+            covered.add(child)
+    ok_claim, why = _integrating_claim(topic, covered)
+    if ok_claim:
+        target = SYNTHESIS_INTEGRATED
+        if state_name != target:
+            mark_synthesis(topic, target, claim=ok_claim, note=why)
+            last = last_synthesis(topic)
+        return {
+            "state": target,
+            "ok": True,
+            "why": "",
+            "record": last,
+            "claim": ok_claim,
+        }
+    # A state that was integrated and no longer is has to say so: the claim
+    # under it was amended, or the premise stopped resolving. The stored
+    # record is corrected, because a file that says "integrated" when the
+    # ledger no longer supports it is the same problem as a gate that
+    # trusts a flag.
+    if state_name == SYNTHESIS_INTEGRATED:
+        mark_synthesis(topic, SYNTHESIS_JUDGED, note=why)
+        last = last_synthesis(topic)
+        state_name = SYNTHESIS_JUDGED
+    return {
+        "state": state_name,
+        "ok": True,
+        "why": why,
+        "record": last,
+    }
+
+
+def _integrating_claim(topic: str, covered: set[str]) -> tuple[str, str]:
+    """A parent claim that genuinely rests on branch evidence.
+
+    Everything the validator would complain about counts here: the premise
+    has to exist in the branch's ledger, be in a state that can support an
+    inference, not be a hypothesis, and the inference may not be stated more
+    strongly than that premise is.
+    """
+    try:
+        from .validate import resolve_premise, _split_ref  # type: ignore
+    except ImportError:
+        try:
+            from research_os_impl.validate import resolve_premise, _split_ref  # type: ignore
+        except ImportError:
+            from validate import resolve_premise, _split_ref  # type: ignore[no-redef]
+    try:
+        from .state import STRENGTH_RANK  # type: ignore
+    except ImportError:
+        from state import STRENGTH_RANK  # type: ignore[no-redef]
+    for row in read_claims(topic):
+        if str(row.get("kind") or "") != "inference":
+            continue
+        premises = [p for p in str(row.get("premises") or "").replace(",", " ").split() if p]
+        if not premises:
+            continue
+        cross = [p for p in premises if _split_ref(p)[0]]
+        if not cross:
+            continue
+        good = True
+        weakest: int | None = None
+        for ref in cross:
+            src, _cid = _split_ref(ref)
+            if src not in covered:
+                good = False
+                break
+            prem, _from, problem = resolve_premise(topic, ref)
+            if problem or prem is None:
+                good = False
+                break
+            pstatus = str(prem.get("status") or "").strip()
+            if pstatus not in ("verified", "derived", "established"):
+                good = False
+                break
+            if str(prem.get("kind") or "") == "hypothesis":
+                good = False
+                break
+            pstr = str(prem.get("strength") or "").strip()
+            if pstr in STRENGTH_RANK:
+                rank = STRENGTH_RANK[pstr]
+                weakest = rank if weakest is None else min(weakest, rank)
+        if not good:
+            continue
+        own = str(row.get("strength") or "").strip()
+        if own in STRENGTH_RANK and weakest is not None and STRENGTH_RANK[own] > weakest:
+            continue
+        return str(row.get("id") or ""), "premise " + " ".join(cross[:3])
+    return "", "父课题还没有一条主张挂在分支的证据上"
+
+
+def directive_progress(topic: str) -> list[dict[str, Any]]:
+    """What each branch was told, and whether it shows any sign of doing it.
+
+    An acknowledged instruction is not an executed one. The branch may have
+    said "received" and gone on with the plan it already had. The only
+    evidence available is whether the branch's own plan or narrative moved
+    after the acknowledgement - not proof, but the difference between "it
+    was told" and "nothing about it moved".
+    """
+    out: list[dict[str, Any]] = []
+    for row in list_branches(topic):
+        d = row.get("directive")
+        if not isinstance(d, dict) or not d:
+            continue
+        child = str(row.get("child") or "").strip()
+        cm = read_map(child) if child else {}
+        moved = 0.0
+        for key in ("plan_at", "narrative_at"):
+            try:
+                moved = max(moved, float(cm.get(key) or 0.0))
+            except (TypeError, ValueError):
+                pass
+        ack = float(d.get("acknowledged_at") or 0.0)
+        followed = bool(ack) and moved > ack
+        out.append({
+            "branch": str(row.get("id") or ""),
+            "child": child,
+            "decision": str(d.get("decision") or ""),
+            "next_question": str(d.get("next_question") or ""),
+            "reason": str(d.get("reason") or ""),
+            "acknowledged_at": d.get("acknowledged_at"),
+            "acknowledged_note": str(d.get("acknowledged_note") or ""),
+            "plan_moved_after": followed,
+            "state": (
+                "未确认" if not ack else ("已落实" if followed else "已确认但计划没动")
+            ),
+        })
+    return out
+
+
 def synthesis_ready(topic: str, branch_ids: list[str] | None = None) -> dict[str, Any]:
     """Is there a synthesis that actually judged, rather than only counted?
 
@@ -1967,13 +2143,22 @@ def synthesis_ready(topic: str, branch_ids: list[str] | None = None) -> dict[str
                 "state": state,
                 "why": f"最近一次综合没有覆盖 {'、'.join(missing)}，它们是之后才收的",
             }
-    if SYNTHESIS_RANK.get(state, 0) < SYNTHESIS_RANK[SYNTHESIS_JUDGED]:
+    # The state is recomputed, not remembered: a claim can be amended and a
+    # premise can stop resolving, and a gate that trusts a stored flag will
+    # keep a synthesis open that no longer stands.
+    current = synthesis_state(topic)
+    if not current.get("ok"):
         return {
             "ok": False,
-            "state": state,
-            "why": "最近一次只生成了摘要，父课题还没写回判断",
+            "state": current.get("state") or state,
+            "why": current.get("why") or "综合还没到判断写回这一步",
         }
-    return {"ok": True, "state": state, "why": ""}
+    out = {"ok": True, "state": current.get("state") or state, "why": ""}
+    if current.get("state") == SYNTHESIS_JUDGED and current.get("why"):
+        # The round is complete, but the parent's conclusion does not yet
+        # rest on the branch evidence - worth saying, not worth refusing.
+        out["note"] = current["why"]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -2093,3 +2278,185 @@ def acknowledge_directive(child_topic: str, *, note: str = "") -> dict[str, Any]
     data["branches"] = rows
     write_branches(parent, data)
     return hit.get("directive") or {}
+
+
+# --------------------------------------------------------------------------
+# rules come in layers, and the middle layer can be set aside on the record
+# --------------------------------------------------------------------------
+#
+# A research system that treats every rule as a law is a bureaucracy: the
+# agent opens two branches because the count is two, and the branches are
+# theatre. A system that treats every rule as a suggestion is nothing at all.
+#
+# So the rules are layered, and only the layer that can protect the record
+# itself refuses to bend:
+#
+#   floor      never waivable - a claim without a source, a record that can
+#              be rewritten without a trace, a premise that points nowhere
+#   control    on by default, waivable with a reason that gets kept
+#   advice     the agent's call; the block states what usually helps
+#   goal       always on - is this project still answering its question
+#
+# The control layer is the one people hit. Three of its rules blocked real
+# work: two routes before leaving divergence, a frozen plan before
+# searching, a review before writing. Each is a good default and a bad law,
+# and the difference is a recorded reason.
+
+WAIVER_FILE = "waivers.json"
+
+# The controls that can be set aside, and what each one is. The stage a
+# control guards is fixed here rather than taken from wherever the agent
+# happened to be standing when it asked: a waiver for "two routes" is about
+# the divergence stage, and an agent that asks for it before it gets there
+# should not be told no.
+WAIVER_GUARDS = {
+    "routes": "发散阶段要两条路线",
+    "protocol": "检索前要冻结方案",
+    "gate": "写状态前要过审稿",
+}
+WAIVER_PHASES = {
+    "routes": ("diverging",),
+    "protocol": ("evidence", "synthesis"),
+    "gate": ("converging",),
+}
+
+
+def read_waivers(topic: str) -> dict[str, Any]:
+    data = _read_json(topic_dir(topic) / WAIVER_FILE, {"waivers": []})
+    if not isinstance(data, dict):
+        return {"waivers": []}
+    if not isinstance(data.get("waivers"), list):
+        data["waivers"] = []
+    return data
+
+
+def add_waiver(topic: str, guard: str, *, reason: str, phase: str = "") -> dict[str, Any]:
+    """Set one control aside, and say why.
+
+    The reason is not a formality: it is the only thing that separates a
+    deliberate departure from a habit. It is kept, shown to the reviewer,
+    and written into the vault, so the exception is visible to whoever
+    reads the project later.
+    """
+    guard = str(guard or "").strip()
+    if guard not in WAIVER_GUARDS:
+        raise ValueError(f"guard must be one of {sorted(WAIVER_GUARDS)}")
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise ValueError(
+            "reason is required: a control set aside without a reason is "
+            "the rule being ignored, not the rule being judged"
+        )
+    data = read_waivers(topic)
+    rows = [w for w in data.get("waivers") or [] if isinstance(w, dict)]
+    rows.append({
+        "guard": guard,
+        "reason": reason,
+        "phase": str(phase or ""),
+        "phases": list(WAIVER_PHASES.get(guard, ())),
+        "at": now(),
+    })
+    data["waivers"] = rows[-30:]
+    _write_json(topic_dir(topic) / WAIVER_FILE, data)
+    return rows[-1]
+
+
+def active_waiver(topic: str, guard: str, *, phase: str = "") -> dict[str, Any]:
+    """The waiver in force for this guard, if any.
+
+    A waiver is scoped to the stage the control guards, not to wherever the
+    agent was standing when it asked. Moving to a different stage ends it:
+    the next piece of work is a different piece of work, and the reason given
+    for the last one does not carry over to it.
+    """
+    guard = str(guard or "").strip()
+    phase = str(phase or "")
+    guarded = WAIVER_PHASES.get(guard, ())
+    best: dict[str, Any] = {}
+    for row in read_waivers(topic).get("waivers") or []:
+        if not isinstance(row, dict) or str(row.get("guard") or "") != guard:
+            continue
+        scope = tuple(row.get("phases") or guarded)
+        if phase and scope and phase not in scope:
+            continue
+        if not phase and scope and not set(scope) & set(guarded):
+            continue
+        best = row
+    return best
+
+
+def waiver_summary(topic: str, *, phase: str = "") -> list[dict[str, Any]]:
+    """The exceptions this project is running under, for the record."""
+    out: list[dict[str, Any]] = []
+    for guard, label in WAIVER_GUARDS.items():
+        row = active_waiver(topic, guard, phase=phase)
+        if row:
+            out.append({
+                "guard": guard,
+                "label": label,
+                "reason": str(row.get("reason") or ""),
+                "phase": str(row.get("phase") or ""),
+                "phases": list(row.get("phases") or WAIVER_PHASES.get(guard, ())),
+                "at": row.get("at"),
+            })
+    return out
+
+
+# --------------------------------------------------------------------------
+# which source is which
+# --------------------------------------------------------------------------
+#
+# "S1" is a library id and the library belongs to one topic. Two branches
+# that each write "S1" are almost certainly citing two different papers, and
+# a digest that reports them as one shared source sends the parent looking
+# for a connection between two things that have nothing to do with each
+# other. The same is true of a bare title.
+#
+# So a source is identified by what can be resolved across topics: a DOI, a
+# PMID, a Zotero item key, a file path. A source that resolves to nothing
+# global stays topic-local, and the digest says so instead of pretending.
+
+_PMID = re.compile(r"\bPMID:?\s*(\d{4,9})\b", re.I)
+_DOI = re.compile(r"\b(10\.\d{4,9}/[^\s\]\[<>\"']+)")
+_ZOTERO = re.compile(r"zotero:([A-Za-z0-9]{4,})", re.I)
+
+
+def source_identity(topic: str, source: str) -> str:
+    """A globally comparable identity for a source, or "" when there is none.
+
+    A library id is resolved through that topic's own library first, so
+    "S3" becomes whatever that entry really is.
+    """
+    text = " ".join(str(source or "").split())
+    if not text:
+        return ""
+    hit = _DOI.search(text)
+    if hit:
+        return "doi:" + hit.group(1).rstrip(".,;")
+    hit = _PMID.search(text)
+    if hit:
+        return "pmid:" + hit.group(1)
+    hit = _ZOTERO.search(text)
+    if hit:
+        return "zotero:" + hit.group(1).upper()
+    head = text.split()[0] if text.split() else ""
+    if head.startswith("S") and head[1:].isdigit():
+        entry = library_lookup(topic, head)
+        if entry:
+            locator = str(entry.get("locator") or "").strip()
+            kind = str(entry.get("kind") or "").strip()
+            if kind == "zotero" and locator:
+                return "zotero:" + locator.upper()
+            if kind == "file" and locator:
+                return "file:" + locator
+            if locator:
+                deeper = source_identity(topic, locator)
+                if deeper:
+                    return deeper
+            doi = str(entry.get("doi") or "").strip()
+            if doi:
+                return "doi:" + doi.rstrip(".,;")
+    # A path that is a file, and a DOI written without the 10.x prefix.
+    if text.startswith("/") or text.startswith("~"):
+        return "file:" + text
+    return ""

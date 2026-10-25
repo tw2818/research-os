@@ -182,6 +182,10 @@ TOOL_SCHEMA: dict[str, Any] = {
         "issues pinned to a specific claim or route. Leaving 收敛 for 更新科研状态 needs a "
         "verdict of pass or pass_with_caveat; after gate_max_rounds the gate lets the work "
         "through with the caveat recorded. "
+        "ACTION 'waive' sets one of the project's controls aside for the current phase, "
+        "with a reason that is kept and shown to the reviewer. The rules come in layers: "
+        "the floor (a claim without a source, a record changed without a trace, a premise "
+        "that points nowhere) is never waived; these three are good defaults and bad laws. "
         "ACTION 'directive' is a parent telling one branch what to do next (continue / "
         "redirect / pause / close, with the reason and the next question); ACTION "
         "'acknowledge' is that branch confirming it received the direction. Without this "
@@ -231,6 +235,7 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "set_state", "review", "source", "library",
                     "delete", "claim", "amend", "validate", "repair",
                     "protocol", "branch", "gate", "synthesize", "directive", "acknowledge",
+                    "waive",
                 ],
                 "description": "What to do.",
             },
@@ -288,15 +293,29 @@ TOOL_SCHEMA: dict[str, Any] = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["systematic", "exploratory"],
+                "enum": ["systematic", "exploratory", "mapping"],
                 "description": (
                     "For action 'protocol': what kind of review this is. "
                     "'systematic' (the default) has to name its estimand, its "
                     "inclusion criteria and its falsifier before it searches. "
-                    "'exploratory' commits only to the falsifier - an "
-                    "exploratory question cannot name its inclusion criteria "
-                    "in advance without guessing, and a frozen guess is worse "
-                    "than an honest open question."
+                    "'exploratory' commits only to the falsifier - the point "
+                    "is to tell rival readings apart. 'mapping' commits only "
+                    "to its scope: building the map of an area has no claim "
+                    "to refute yet, and demanding one produces a formal "
+                    "sentence that refutes nothing."
+                ),
+            },
+            "guard": {
+                "type": "string",
+                "enum": ["routes", "protocol", "gate"],
+                "description": (
+                    "For action 'waive': which control to set aside for this "
+                    "phase. 'routes' - two routes before leaving divergence; "
+                    "'protocol' - a frozen plan before searching; 'gate' - a "
+                    "review before writing. A reason is required and is kept "
+                    "on the record. The floor rules (a claim without a source, "
+                    "a record changed without a trace, a premise that points "
+                    "nowhere) are not waivable."
                 ),
             },
             "decision": {
@@ -954,12 +973,11 @@ def _mark_integrated(topic: str, row: dict[str, Any]) -> None:
         # digest count as integrated.
         if covered and src not in covered:
             continue
-        _state.mark_synthesis(
-            topic,
-            _state.SYNTHESIS_INTEGRATED,
-            claim=str(row.get("id") or ""),
-            note=f"premise {ref}",
-        )
+        # The state is not set here. It is recomputed from the ledger by
+        # `synthesis_state`, which checks that the premise exists, is
+        # verified and is not weaker than the claim resting on it - so
+        # naming an id that does not exist cannot open the gate.
+        _state.synthesis_state(topic)
         return
 
 
@@ -999,6 +1017,10 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
             "topic": topic_name,
             "protocol": dict(proto),
             "locked": locked,
+            "mode": str(proto.get("mode") or "systematic"),
+            "mode_label": _state.PROTOCOL_MODE_LABELS.get(
+                str(proto.get("mode") or "systematic"), ""
+            ),
         }
         if locked:
             payload["locked_at"] = proto.get("locked_at")
@@ -1011,7 +1033,11 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
             payload["next"] = (
                 "方案还是草稿。"
                 + (("补齐 " + "、".join(missing) + " 之后") if missing else "")
-                + "用 freeze=true 冻结；冻结之前，evidence / weighing 阶段的检索会被拒。"
+                + "用 freeze=true 冻结；冻结之前，evidence / weighing 阶段的检索会被拒。\n"
+                "这一轮的科学活动是哪一种："
+                "梳理领域（mode='mapping'，只要范围）、比较解释（mode='exploratory'，要否证条件）、"
+                "验证已定的问题（mode='systematic'，要估计量+纳入+否证）。"
+                "类型选错，后面的检索门就会用错的那把尺子量你。"
             )
         return ok(payload)
 
@@ -1495,6 +1521,51 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 ),
             })
 
+        if action == "waive":
+            # Setting a control aside, on the record. Three of the rules
+            # blocked real work: two routes before leaving divergence, a
+            # frozen plan before searching, a review before writing. Each is
+            # a good default and a bad law, and the difference is a reason
+            # that gets kept - and shown to the reviewer, so the exception is
+            # part of the project rather than a hole in it.
+            if not project:
+                return fail("project is required")
+            if not _state.topic_exists(project):
+                return fail(f"no such topic: {project!r}")
+            guard = str(args.get("guard") or "").strip()
+            reason = " ".join(str(args.get("reason") or "").split())
+            if not guard:
+                return fail(
+                    "guard 必填：routes（发散要两条路线）| protocol（检索前冻结方案）"
+                    "| gate（写状态前过审稿）。"
+                )
+            if guard not in _state.WAIVER_GUARDS:
+                return fail(
+                    f"guard 只能是：{'、'.join(sorted(_state.WAIVER_GUARDS))}。"
+                    f"底线类的规则（无来源的主张、悄悄改记录、悬空的前提）不设为例外，"
+                    f"它们保护的是记录本身。"
+                )
+            if not reason:
+                return fail(
+                    "reason 必填：不写理由的例外不是判断了规则，是绕过了规则。"
+                    "理由会留在记录里，也会给审稿人看。"
+                )
+            phase = _protocol.normalize_phase(_state.read_map(project).get("phase") or "")
+            try:
+                row = _state.add_waiver(project, guard, reason=reason, phase=phase)
+            except ValueError as exc:
+                return fail(str(exc))
+            _notify(f"科研 · {project} · 本阶段豁免「{_state.WAIVER_GUARDS[guard]}」")
+            return ok({
+                "topic": project,
+                "waiver": row,
+                "phase": phase,
+                "note": (
+                    "例外只在当前阶段有效。换个阶段就要重新判断，"
+                    "理由不会自动跟过去——下一阶段是另一件事。"
+                ),
+            })
+
         if action == "directive":
             # The parent tells a branch what to do next. Without this the
             # tree only flows upward: the branch reports, the parent nods,
@@ -1606,6 +1677,13 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 branches=branches,
                 open_questions=[str(q) for q in (m.get("open_questions") or [])],
                 parent=str(parent.get("name") or ""),
+                waivers=_state.waiver_summary(
+                    project, phase=_protocol.normalize_phase(str(m.get("phase") or ""))
+                ),
+                mode=(
+                    f"{_state.PROTOCOL_MODE_LABELS.get(str(_state.read_protocol(project).get('mode') or 'systematic'), '')}"
+                    if _state.read_protocol(project).get("mode") else ""
+                ),
             )
             reviews = _state.read_gate(project).get("reviews") or []
             round_no = len(reviews) + 1
@@ -1702,6 +1780,7 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 parent_map=parent_map,
                 branches=branches,
                 branch_state=branch_state,
+                source_identity=_state.source_identity,
             )
             record = {
                 "at": _state.now(),
@@ -1718,6 +1797,7 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 "summary": _synthesis.summarize(digest),
                 "branches": digest.get("branches"),
                 "shared_sources": digest.get("shared_sources"),
+                "local_source_collisions": digest.get("local_source_collisions"),
                 "overlapping_claims": digest.get("overlapping_claims"),
                 "open_conflicts": digest.get("open_conflicts"),
                 "unsynthesised": digest.get("unsynthesised"),
@@ -1777,6 +1857,9 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
             locked = bool(current.get("locked"))
             if not changes and not freeze and not reason:
                 return report_protocol(project, current)   # 'show' is the default
+            # Changing the mode on its own is a normal call: a project that
+            # turns out to be a mapping rather than a hypothesis test has
+            # to be able to say so.
             if locked and (changes or freeze) and not reason:
                 return fail(
                     f"「{project}」的方案已经冻结了。要改它，先给 unfreeze_reason："
@@ -1797,11 +1880,13 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                     names = {"estimand": "估计量（estimated quantity）", "inclusion": "纳入标准",
                              "falsifier": "否证条件（什么结果会推翻它）"}
                     mode = str(_state.read_protocol(project).get("mode") or "systematic")
-                    tail = (
-                        "探索型方案只要求否证条件，但这一条不能空。"
-                        if mode == "exploratory"
-                        else "缺一样，冻结的就是一个方向，不是一次检验。"
-                    )
+                    tail = {
+                        "exploratory": "探索型方案只要求否证条件，但这一条不能空。",
+                        "mapping": (
+                            "梳理型方案只要求把范围写清楚。梳理一个领域的时候没有"
+                            "现成的结论可否证，硬要写一句只会写出一句什么都不否证的话。"
+                        ),
+                    }.get(mode, "缺一样，冻结的就是一个方向，不是一次检验。")
                     return fail(
                         "冻结前还缺：" + "、".join(names.get(m) or m for m in missing) + "。" + tail
                     )
@@ -1887,17 +1972,24 @@ def _tool_handler_raw(args: dict[str, Any], **kwargs: Any) -> str:
                 cfg_gate = _state.load_config()
                 if current_phase == "diverging" and key != "diverging":
                     routes = _state.list_branches(project)
-                    if len(routes) < 2:
+                    if len(routes) < 2 and not _state.active_waiver(
+                        project, "routes", phase=current_phase
+                    ):
                         return fail(
-                            f"发散阶段要至少两条路线才能往外走，现在有 {len(routes)} 条。"
-                            f"一条路线不叫发散，叫认领了第一个想法。\n"
-                            f"先用 branch 开路线：route（这条路检验什么）+ why_relevant"
-                            f"（它服务核心问题的哪一面），开两条以上再推进。"
+                            f"发散阶段默认要两条路线才能往外走，现在有 {len(routes)} 条。"
+                            f"一条路线不叫发散，叫认领了第一个想法——除非这一轮本来"
+                            f"就不是在比较方案，而是在把一条路线做深。\n"
+                            f"两条：用 branch 开 route（这条路检验什么）+ why_relevant"
+                            f"（它服务核心问题的哪一面）。\n"
+                            f"确实是做深一条：research_mode(action='waive', project='{project}', "
+                            f"guard='routes', reason='<为什么这一轮不需要两条路线>')，"
+                            f"理由会留在记录里。"
                         )
                 if (
                     current_phase == "converging"
                     and key in ("updating", "writing")
                     and cfg_gate.get("require_gate", True)
+                    and not _state.active_waiver(project, "gate", phase=current_phase)
                 ):
                     last = _state.last_gate_review(project)
                     if not last:
@@ -3024,13 +3116,30 @@ def _protocol_block_message(topic: str) -> str:
     else:
         lacks = "- 都齐了，只差 freeze=true"
     proto = _state.read_protocol(topic)
+    mode = str(proto.get("mode") or "systematic").strip()
+    mode_line = (
+        f"\n这一轮的方案类型：{_state.PROTOCOL_MODE_LABELS.get(mode, mode)}。"
+        f"类型不对就改：protocol 带 mode='systematic'|'exploratory'|'mapping'。"
+    )
     zot = str(proto.get("zotero_collection") or "").strip()
     zot_line = f"\n文献库入口：Zotero 集合「{zot}」。" if zot else ""
+    waiver = _state.active_waiver(topic, "protocol", phase="evidence")
+    if waiver:
+        waiver_line = "\n（这一轮的检索已经明确不冻结方案，理由在记录里。）"
+    else:
+        waiver_line = (
+            f"\n如果这一轮本来就不该冻结方案——梳理一个领域、比较几种解释、"
+            f"或者只是把材料读一遍——说明活动类型，然后按那个类型写；"
+            f"确实不写方案的，research_mode(action='waive', project='{topic}', "
+            f"guard='protocol', reason='<为什么这一轮不用先冻结>')，"
+            f"理由会留在记录里，也会给审稿人看。"
+        )
     return (
         f"先别检索。「{topic}」已经过了定题阶段，但还没有冻结的方案。\n"
         f"没有冻结方案就开始收集文献，是先把材料捞回来、再决定自己在数什么——"
         f"收集到的每一条都会看起来有用，因为标准是事后才定的。\n"
-        f"现在缺：\n{lacks}{zot_line}\n"
+        f"现在缺：\n{lacks}{mode_line}{zot_line}\n"
+        f"{waiver_line}\n"
         f"写好并冻结：research_mode(action='protocol', project='{topic}', "
         f"estimand='<在估哪个量>', inclusion='<标准1>|<标准2>', "
         f"falsifier='<什么结果算推翻>', freeze=true)。\n"
@@ -3093,6 +3202,11 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
                 and _protocol.normalize_phase(_state.read_map(topic).get("phase") or "")
                 in ("evidence", "synthesis")
                 and not _state.protocol_locked(topic)
+                and not _state.active_waiver(
+                    topic, "protocol", phase=_protocol.normalize_phase(
+                        _state.read_map(topic).get("phase") or ""
+                    )
+                )
             ):
                 return {"action": "block", "message": _protocol_block_message(topic)}
             # The topic is open. A run that searches forever and never answers

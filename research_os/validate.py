@@ -170,6 +170,10 @@ def resolve_premise(
         foreign_not_related   cites a topic outside this topic's family
         unknown_topic         the referenced topic does not exist
         missing               the id is not in the referenced ledger
+
+    The success case returns "" and not "missing": the code is about what
+    went wrong, and a caller that asks "did it resolve" must be able to tell
+    "resolved" from "failed" without inspecting the claim.
     """
     cache = cache if cache is not None else {}
     src, cid = _split_ref(ref)
@@ -180,7 +184,8 @@ def resolve_premise(
         if rows is None:
             rows = read_claims(topic)
             cache[topic] = rows
-        return next((c for c in rows if str(c.get("id") or "") == cid), None), topic, "missing"
+        hit = next((c for c in rows if str(c.get("id") or "") == cid), None)
+        return hit, topic, ("" if hit is not None else "missing")
     if family is None:
         family = _family(topic)
     if src not in family:
@@ -191,7 +196,8 @@ def resolve_premise(
     if rows is None:
         rows = read_claims(src)
         cache[src] = rows
-    return next((c for c in rows if str(c.get("id") or "") == cid), None), src, "missing"
+    hit = next((c for c in rows if str(c.get("id") or "") == cid), None)
+    return hit, src, ("" if hit is not None else "missing")
 
 
 def _find_bundled_conclusion(content: str) -> tuple[str, str] | None:

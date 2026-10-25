@@ -953,6 +953,25 @@ def _render_directives(topic: str, *, obsidian: bool) -> str:
     return "\n".join(lines)
 
 
+def _render_waivers(topic: str, *, obsidian: bool) -> str:
+    """The exceptions this project is running under.
+
+    A project that set a control aside has to show it. The reason sits next
+    to the thing it excuses, so a reader can judge the judgement.
+    """
+    rows = _safe(lambda: state.waiver_summary(topic), [])
+    if not rows:
+        return ""
+    lines = ["## 本阶段的例外", ""]
+    for w in rows:
+        lines.append(
+            f"- **{w.get('label') or w.get('guard')}**（{w.get('phase') or '本阶段'}）："
+            f"{w.get('reason')}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_synthesis(topic: str, *, obsidian: bool) -> str:
     """What the parent learned from its branches, on the parent's page.
 
@@ -1138,6 +1157,8 @@ def render_topic(
             _render_routes(topic, obsidian=obsidian)
             + "\n"
             + _render_directives(topic, obsidian=obsidian)
+            + "\n"
+            + _render_waivers(topic, obsidian=obsidian)
             + "\n"
             + _render_synthesis(topic, obsidian=obsidian)
         )

@@ -231,6 +231,52 @@ filled that in would be handing over a conclusion it is not entitled to.
 
 ---
 
+## The rules come in layers
+
+A research system that treats every rule as a law is a bureaucracy: the
+agent opens two branches because the count is two, and the branches are
+theatre. A system that treats every rule as a suggestion is nothing at all.
+So the rules are layered:
+
+| layer | what is in it | can it be set aside |
+|---|---|---|
+| floor | a claim without a source, a record changed without a trace, a premise that points nowhere, a ledger written outside the tool | never — it protects the record itself |
+| control | two routes before leaving divergence, a frozen plan before searching, a review before writing | yes, with a reason that is kept and shown to the reviewer |
+| advice | which phase, whether to search now, how many routes to open | no — the agent's call |
+| goal | is this project still answering its question, and did anything actually move | no |
+
+`action='waive'` sets one of the three controls aside for the stage it
+guards:
+
+```
+research_mode(action="waive", project="X", guard="routes",
+              reason="这一轮是把 MDL 环路的细胞类型做深，不是在比较方案")
+```
+
+The reason is the whole point. A control set aside without one is the rule
+being ignored rather than judged, so the reason is required, it is kept in
+`waivers.json`, it appears in the injected block, it goes into the vault,
+and the reviewer sees it and judges the reason rather than the presence.
+
+A waiver is scoped to the stage it guards. Moving to a different stage ends
+it: the next piece of work is a different piece of work.
+
+**The stage is not a number, it is a kind of research.** Three kinds, with
+three different things to commit to:
+
+| mode | the activity | what has to be written before searching |
+|---|---|---|
+| `systematic` (default) | a defined question with a defined quantity | estimand + inclusion + falsifier |
+| `exploratory` | comparing rival explanations | a falsifier |
+| `mapping` | building the map of an area | the scope |
+
+Demanding a falsifier from a mapping task produces a formal sentence that
+refutes nothing, and teaches the agent to write down things that are not
+true. A mapping project commits to what it is covering; that is the honest
+version of the same discipline.
+
+---
+
 ## Telling the branches what to do next
 
 A tree whose parent only points downward is a folder. `action='directive'`
@@ -337,6 +383,8 @@ A topic is one research question and the state that accumulates around it:
     syntheses.json          each cross-branch synthesis: which branches it
                              covered, the digest it was made from, and what it
                              demanded the parent answer
+    waivers.json            the controls this project set aside, with the
+                             reason, and the stage each one applies to
     gate-reviews.json      every review the gate made, with scores, blocking
                             issues and the verdict, kept so a project waved
                             through reads that way
@@ -599,6 +647,7 @@ research_mode(action="branch", project="X", branch_id="B1",
               branch_status="concluded", contribution="...")
 research_mode(action="gate", project="X", gate_reason="...")
 research_mode(action="synthesize", project="X")
+research_mode(action="waive", project="X", guard="routes", reason="...")
 research_mode(action="directive", project="X", branch_id="B2", decision="redirect",
               reason="...", next_question="...", priority="high")
 research_mode(action="acknowledge", project="X-B2", acknowledge_note="...")

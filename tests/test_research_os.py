@@ -1728,7 +1728,7 @@ def test_a_parent_must_synthesise_what_its_branches_produced():
     ))
     assert "error" not in digest, digest
     assert digest["shared_sources"], digest
-    assert digest["shared_sources"][0]["source"] == "PMID 12345678", digest
+    assert digest["shared_sources"][0]["source"] == "pmid:12345678", digest
     assert digest["overlapping_claims"], digest
     assert digest["demands"], digest
     assert "B1" in digest["unsynthesised"], digest
@@ -1769,7 +1769,12 @@ def test_the_synthesis_digest_counts_rather_than_judges():
         },
     )
     assert digest["branch_count"] == 2 and digest["concluded"] == 1, digest
-    assert digest["shared_sources"] == [{"source": "S1", "branches": ["B1", "B2"]}], digest
+    # "S1" in two branches is two different papers: the id belongs to the
+    # branch's own library. Without a globally resolvable identity it is not
+    # a shared source, and the digest says which is which.
+    assert digest["shared_sources"] == [], digest
+    assert digest["local_source_collisions"], digest
+    assert digest["local_source_collisions"][0]["branches"] == ["B1", "B2"], digest
     assert digest["overlapping_claims"], digest
     assert digest["unsynthesised"] == ["B1"], digest
     assert any("练习效应" in d for d in digest["demands"]), digest["demands"]
@@ -2044,6 +2049,283 @@ def test_an_exploratory_plan_only_has_to_commit_to_what_would_refute_it():
         {"action": "protocol", "project": other, "falsifier": "效应量小于 0.2"},
         session_id="t-mode"))
     assert set(shown["missing_before_freeze"]) == {"estimand", "inclusion"}, shown
+
+
+def test_only_a_globally_resolvable_source_counts_as_shared():
+    """Two branches writing "S1" are two papers; two branches writing the
+    same PMID are one paper. The difference is the whole point of a shared
+    source, so it has to be decided by what resolves, not by the string."""
+    def identity(topic: str, source: str) -> str:
+        text = str(source or "")
+        if text.startswith("PMID"):
+            return "pmid:" + text.split()[1]
+        return ""
+
+    digest = synthesis.build_digest(
+        "P",
+        parent_map={},
+        branches=[
+            {"id": "B1", "child": "P-B1", "route": "r1", "status": "open", "contribution": ""},
+            {"id": "B2", "child": "P-B2", "route": "r2", "status": "open", "contribution": ""},
+        ],
+        branch_state={
+            "P-B1": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": "同一项研究的两个测量", "source": "PMID 12345"},
+            ], "contradictions": []},
+            "P-B2": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": "同一项研究的另两个测量", "source": "PMID 12345"},
+            ], "contradictions": []},
+        },
+        source_identity=identity,
+    )
+    assert digest["shared_sources"] == [{"source": "pmid:12345", "branches": ["B1", "B2"]}], digest
+    assert not digest["local_source_collisions"], digest
+
+
+def test_a_control_can_be_set_aside_with_a_reason_that_is_kept():
+    """The rules come in layers. The floor (a claim without a source, a record
+    changed without a trace, a premise that points nowhere) is never waived.
+    These three are good defaults and bad laws."""
+    m = _handler()
+    topic = "T-waive"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    m._tool_handler({"action": "create", "project": topic, "core_question": "Q?"}, session_id="t-w")
+    m._tool_handler({"action": "on", "project": topic}, session_id="t-w")
+    state.write_state(topic, phase="diverging")
+    blocked = json.loads(m._tool_handler(
+        {"action": "set_state", "project": topic, "phase": "evidence"}, session_id="t-w"))
+    assert "error" in blocked and "两条路线" in blocked["error"], blocked
+    no_reason = json.loads(m._tool_handler(
+        {"action": "waive", "project": topic, "guard": "routes"}, session_id="t-w"))
+    assert "error" in no_reason and "reason" in no_reason["error"], no_reason
+    bad_guard = json.loads(m._tool_handler(
+        {"action": "waive", "project": topic, "guard": "ledger", "reason": "x"}, session_id="t-w"))
+    assert "error" in bad_guard, bad_guard
+    waived = json.loads(m._tool_handler({
+        "action": "waive", "project": topic, "guard": "routes",
+        "reason": "这一轮是把 MDL 环路的细胞类型做深，不是在比较方案",
+    }, session_id="t-w"))
+    assert "error" not in waived, waived
+    through = json.loads(m._tool_handler(
+        {"action": "set_state", "project": topic, "phase": "evidence"}, session_id="t-w"))
+    assert "error" not in through, through
+    # The reason is on the record, not just in the reply.
+    summary = state.waiver_summary(topic, phase="diverging")
+    assert summary and summary[0]["guard"] == "routes", summary
+    assert "做深" in summary[0]["reason"], summary
+    # A different stage is a different piece of work: the reason does not
+    # travel with it.
+    assert not state.waiver_summary(topic, phase="converging")
+
+
+
+
+def test_a_mapping_project_commits_to_its_scope_and_nothing_else():
+    """Building the map of an area has no claim to refute yet. Demanding a
+    falsifier from it produces a formal sentence that refutes nothing, and
+    teaches the agent to write down things that are not true."""
+    m = _handler()
+    topic = "T-map-mode"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    json.loads(m._tool_handler({"action": "create", "project": topic,
+                                "core_question": "MD 核团各亚区的功能是什么？"},
+                               session_id="t-mm"))
+    shown = json.loads(m._tool_handler(
+        {"action": "protocol", "project": topic, "mode": "mapping",
+         "inclusion": "MD 背侧中线核团各亚区 | 啮齿类与灵长类"},
+        session_id="t-mm"))
+    assert "error" not in shown, shown
+    assert shown["missing_before_freeze"] == [], shown
+    assert shown["mode"] == "mapping", shown
+    frozen = json.loads(m._tool_handler(
+        {"action": "protocol", "project": topic, "freeze": True}, session_id="t-mm"))
+    assert frozen["locked"] is True, frozen
+
+
+def test_negation_survives_the_tokeniser():
+    """"not" was in the stopword list, which made "improved" and "did not
+    improve" the same token bag: a contradiction reported as a duplicate."""
+    assert "not" not in synthesis._STOP
+    assert "no" not in synthesis._STOP
+    assert "never" not in synthesis._STOP
+    plain = synthesis._tokens("the intervention improved cognition")
+    negated = synthesis._tokens("the intervention did not improve cognition")
+    assert plain != negated, (plain, negated)
+    assert synthesis._negated("did not improve cognition")
+    assert not synthesis._negated("improved cognition")
+    # Double negation: "not absent" and "无不" claim that something is
+    # there, and reporting them as absences inverts the finding.
+    assert not synthesis._negated("not absent"), "double negation reads as presence"
+    assert not synthesis._negated("无不"), "double negation reads as presence"
+    # A negation inside a different word is not a negation of the claim.
+    assert not synthesis._negated("different regions"), "不 in 不同 is not a negation"
+    assert not synthesis._negated("not only cognition"), "context matters"
+
+
+def test_the_threshold_does_not_hide_a_real_pair():
+    """A pair one point below the cut is not reported, and one just above it
+    is - the boundary has to be where the number says, not where the
+    implementation happens to be."""
+    a = "八周安慰剂对照未见额外认知增益"
+    b = "八周安慰剂对照未见额外认知增益的重复报告"
+    score = synthesis._jaccard(synthesis._tokens(a), synthesis._tokens(b))
+    assert 0.5 < score < 0.95, score
+    high = synthesis.build_digest(
+        "P", parent_map={},
+        branches=[
+            {"id": "B1", "child": "P-B1", "route": "r1", "status": "open", "contribution": ""},
+            {"id": "B2", "child": "P-B2", "route": "r2", "status": "open", "contribution": ""},
+        ],
+        branch_state={
+            "P-B1": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": a, "source": "PMID 1"}], "contradictions": []},
+            "P-B2": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": b, "source": "PMID 2"}], "contradictions": []},
+        },
+        threshold=score,
+    )
+    assert high["overlapping_claims"], high
+    just_above = synthesis.build_digest(
+        "P", parent_map={},
+        branches=[
+            {"id": "B1", "child": "P-B1", "route": "r1", "status": "open", "contribution": ""},
+            {"id": "B2", "child": "P-B2", "route": "r2", "status": "open", "contribution": ""},
+        ],
+        branch_state={
+            "P-B1": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": a, "source": "PMID 1"}], "contradictions": []},
+            "P-B2": {"phase": "找证据", "narrative": "", "claims": [
+                {"kind": "observation", "content": b, "source": "PMID 2"}], "contradictions": []},
+        },
+        threshold=score + 0.01,
+    )
+    assert not just_above["overlapping_claims"], just_above
+
+
+def test_confirming_a_directive_is_not_the_same_as_doing_it():
+    """An acknowledged instruction is an instruction the branch read. Whether
+    the branch then worked on it is a different question, and the plan's own
+    timestamp is the only evidence available."""
+    parent, child = "T-dp", "T-dp-B1"
+    _family_pair(parent, child)
+    state.set_directive(parent, "B1", decision="redirect", reason="改查长端",
+                        next_question="六个月缓解者是否回到对照水平")
+    state.acknowledge_directive(child, note="这一轮就查这个")
+    rows = state.directive_progress(parent)
+    assert rows and rows[0]["state"] == "已确认但计划没动", rows
+    state.write_state(child, plan="改查长端：六个月缓解者")
+    rows = state.directive_progress(parent)
+    assert rows[0]["state"] == "已落实", rows
+    assert rows[0]["plan_moved_after"] is True, rows
+
+
+
+
+# --------------------------------------------------------------------------
+# three scenarios, asked for before any more mechanisms
+# --------------------------------------------------------------------------
+
+
+def test_scenario_open_exploration_a_field_can_be_mapped_without_a_hypothesis():
+    """"I want to understand what is known about the subregions of the MD
+    nucleus." There is no claim to refute yet, and a system that demands one
+    gets a formal sentence that refutes nothing - and teaches the agent to
+    write down things that are not true."""
+    m = _handler()
+    topic = "T-sc-map"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    m._tool_handler({"action": "create", "project": topic,
+                     "core_question": "MD 核团各亚区在情绪加工里各做什么？"},
+                    session_id="t-sc")
+    m._tool_handler({"action": "on", "project": topic}, session_id="t-sc")
+    # The plan for a mapping is a scope, not a falsifier.
+    proto = json.loads(m._tool_handler({
+        "action": "protocol", "project": topic, "mode": "mapping",
+        "inclusion": "MD 背侧中线核团（MDL/MDM/MDV）| 啮齿类 | 情绪与认知任务",
+    }, session_id="t-sc"))
+    assert "error" not in proto, proto
+    assert proto["missing_before_freeze"] == [], proto
+    frozen = json.loads(m._tool_handler(
+        {"action": "protocol", "project": topic, "freeze": True}, session_id="t-sc"))
+    assert frozen["locked"] is True, frozen
+    # And the search is allowed: the gate was asking the right question.
+    block = m._pre_tool_call(
+        tool_name="mcp__pubmed__pubmed_search_articles",
+        args={"query": "mediodorsal thalamus subregions emotion"},
+        session_id="t-sc",
+    )
+    assert not (isinstance(block, dict) and block.get("action") == "block"), block
+
+
+def test_scenario_unexpected_finding_can_be_recorded_and_the_map_moved():
+    """A finding that does not obviously belong to the question is still a
+    finding. What it must not be is quietly dropped, and what must be
+    possible is moving the question - with the old one kept."""
+    m = _handler()
+    topic = "T-sc-unexpected"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    m._tool_handler({"action": "create", "project": topic,
+                     "core_question": "情感障碍和认知障碍是不是一回事？"},
+                    session_id="t-su")
+    m._tool_handler({"action": "on", "project": topic}, session_id="t-su")
+    got = json.loads(m._tool_handler({
+        "action": "claim", "project": topic,
+        "claim": {
+            "kind": "hypothesis",
+            "content": "如果两个域共享前额叶的同一批投射，耦合/腟合只是同一个过程的两面",
+            "note": "在查文献时撞上的，和原问题关系不明显，但可能更根本",
+        },
+    }, session_id="t-su"))
+    assert "error" not in got, got
+    # It may become the question, and the old one stays on the record.
+    moved = json.loads(m._tool_handler({
+        "action": "set_state", "project": topic,
+        "core_question": "情感与认知是否共享同一套前额叶投射？",
+        "question_reason": "文献撞到同一批投射的证据，两域之分的问法可能问错了地方",
+    }, session_id="t-su"))
+    assert "error" not in moved, moved
+    m_map = state.read_map(topic)
+    assert m_map["core_question"] == "情感与认知是否共享同一套前额叶投射？", m_map
+    hist = m_map.get("question_history") or []
+    assert hist and hist[-1]["was"] == "情感障碍和认知障碍是不是一回事？", hist
+    assert "问错" in hist[-1]["why"], hist
+
+
+def test_scenario_a_small_task_does_not_get_the_full_apparatus():
+    """"Read this one paper and compare the two mechanisms." Two branches, a
+    frozen protocol and a stage review are the wrong shape for that, and a
+    system that insists on them is enforcing its own method over the
+    question."""
+    m = _handler()
+    topic = "T-sc-small"
+    if state.topic_exists(topic):
+        state.delete_topic(topic, permanent=True)
+    m._tool_handler({"action": "create", "project": topic,
+                     "core_question": "这篇里的两个机制差在哪？"},
+                    session_id="t-ss")
+    m._tool_handler({"action": "on", "project": topic}, session_id="t-ss")
+    # No branch is needed to look at one paper.
+    state.write_state(topic, phase="evidence")
+    claims = json.loads(m._tool_handler({
+        "action": "claim", "project": topic,
+        "claim": {
+            "kind": "observation",
+            "content": "两者的操纵都在背侧中线核团，但一在 MDL 一在 MDV",
+            "source": "PMID 12345678",
+        },
+    }, session_id="t-ss"))
+    assert "error" not in claims, claims
+    # And the writing stage does not demand a stage review it never needed.
+    state.write_state(topic, phase="writing")
+    wrote = json.loads(m._tool_handler({
+        "action": "set_state", "project": topic,
+        "narrative": "这篇里两个机制差在亚区，不在通路性质",
+    }, session_id="t-ss"))
+    assert "error" not in wrote, wrote
 
 
 class _FakeCtx:

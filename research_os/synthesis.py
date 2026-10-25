@@ -22,21 +22,21 @@ actually better at.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 # Tokens too common to say anything about two claims being the same claim.
 _STOP = {
     "the", "and", "for", "with", "that", "this", "from", "were", "was", "are",
-    "not", "but", "its", "their", "than", "then", "which", "when", "what",
+    "but", "its", "their", "than", "then", "which", "when", "what",
     "have", "has", "had", "into", "over", "under", "does", "did", "can", "may",
     "vs", "versus", "effect", "effects", "study", "studies", "group", "groups",
-    # Negation is deliberately absent from this set. It is not a word that
-    # carries no meaning in a comparison - it is the word that decides
-    # whether two nearly identical claims agree or contradict. Dropping it
-    # would make "improved" and "did not improve" the same token bag and
-    # report a contradiction as a duplicate.
+    # Negation is deliberately absent from this set: "not", "no" and "never"
+    # are the words that decide whether two nearly identical claims agree or
+    # contradict, and a stopword list that swallows them makes "improved"
+    # and "did not improve" the same token bag. They stay as tokens, and
+    # `_negated` reports the polarity difference on top of that.
     "的", "了", "和", "与", "在", "是", "对", "有", "个", "这", "那", "也",
-    "研究", "结果", "患者", "分析", "显著", "差异", "相关",
+    "研究", "结果", "患者", "分析",
 }
 
 _WORD = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
@@ -48,16 +48,37 @@ _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 # ordinary pair into a reported conflict.
 _NEGATION = re.compile(
     r"(未(?:见|能|发现|达到|显著|改善|出现)|没有(?:显著)?|无(?:显著)?(?:差异|改善|变化)"
-    r"|不(?:显著|支持|成立|改善|存在|一致)|并不|未能|not\b|no\b|never\b"
+    r"|不(?:显著|支持|成立|改善|存在|一致)|并不|未能"
+    r"|(?<!not )not(?!\s+(?:only|just|merely)\b)"
+    r"|\bno\b(?!t\b)|\bnever\b"
     r"|without\b|absence\s+of|failed\s+to|did\s+not|does\s+not|was\s+not"
     r"|were\s+not|is\s+not|are\s+not|didn't|doesn't|wasn't|weren't|isn't|aren't)",
     re.I,
 )
 
 
+# Two negations make a presence. "not absent" and "无不" claim that
+# something is there, and a detector that calls them absences reports the
+# opposite of what they say.
+_DOUBLE_NEGATION = re.compile(
+    r"(?:不|无|没|未)(?:有)?\s*(?:不|无|没|未)"
+    r"|not\s+(?:absent|missing|without|empty)\b"
+    r"|no\s+absence\b",
+    re.I,
+)
+
+
 def _negated(text: str) -> bool:
-    """Whether the claim asserts an absence rather than a presence."""
-    return bool(_NEGATION.search(str(text or "")))
+    """Whether the claim asserts an absence rather than a presence.
+
+    A word-level detector cannot settle every case - "no effect was absent"
+    is a presence wrapped in two layers - so the two-negation case is
+    caught explicitly and everything else is left to the judgement step.
+    """
+    body = str(text or "")
+    if _DOUBLE_NEGATION.search(body):
+        return False
+    return bool(_NEGATION.search(body))
 
 
 def _tokens(text: str) -> set[str]:
@@ -102,6 +123,7 @@ def build_digest(
     branches: Sequence[Dict[str, Any]],
     branch_state: Dict[str, Dict[str, Any]],
     threshold: float = 0.55,
+    source_identity: Optional[Callable[[str, str], str]] = None,
 ) -> Dict[str, Any]:
     """What the parent can learn from its branches, as facts.
 
@@ -116,6 +138,7 @@ def build_digest(
     """
     detail: List[Dict[str, Any]] = []
     source_map: Dict[str, List[str]] = {}
+    local_map: Dict[str, List[str]] = {}
     claim_rows: List[Dict[str, Any]] = []
     open_conflicts: List[Dict[str, Any]] = []
 
@@ -125,15 +148,34 @@ def build_digest(
         state = branch_state.get(child) or {}
         claims = [c for c in (state.get("claims") or []) if isinstance(c, dict)]
         sources = sorted({str(c.get("source") or "").strip() for c in claims if str(c.get("source") or "").strip()})
-        for src in sources:
-            source_map.setdefault(src, []).append(branch_id)
         for c in claims:
+            raw_source = str(c.get("source") or "")
+            # "S1" is one topic's library id. Two branches each writing "S1"
+            # are citing two different papers, and reporting that as one
+            # shared source sends the parent hunting for a connection
+            # between unrelated things. So the source is keyed by what
+            # resolves across topics - a DOI, a PMID, a Zotero key - and a
+            # source that resolves to nothing global stays topic-local.
+            identity = ""
+            if source_identity is not None:
+                try:
+                    identity = source_identity(child, raw_source)
+                except Exception:
+                    identity = ""
+            if identity:
+                source_map.setdefault(identity, []).append(branch_id)
+            else:
+                # Not resolvable across topics. The same string in two
+                # branches is then a coincidence of naming, and it is worth
+                # reporting as exactly that - not as shared evidence.
+                local_map.setdefault(raw_source, []).append(branch_id)
             claim_rows.append({
                 "branch": branch_id,
                 "kind": str(c.get("kind") or ""),
                 "strength": str(c.get("strength") or ""),
                 "content": str(c.get("content") or ""),
-                "source": str(c.get("source") or ""),
+                "source": raw_source,
+                "source_id": identity,
             })
         for item in state.get("contradictions") or []:
             if not isinstance(item, dict):
@@ -159,9 +201,18 @@ def build_digest(
             "closed_at": branch.get("closed_at"),
         })
 
+    # Only a source that resolves across topics can be shared. A topic-local
+    # id that appears in two branches is a coincidence of naming, and
+    # reporting it as a shared finding is the kind of thing a parent then
+    # builds an explanation on.
     shared_sources = [
         {"source": src, "branches": ids}
         for src, ids in sorted(source_map.items(), key=lambda kv: -len(kv[1]))
+        if len(ids) > 1 and not src.startswith("local:")
+    ]
+    local_collisions = [
+        {"source": src, "branches": ids, "kind": "not resolvable across topics"}
+        for src, ids in sorted(local_map.items(), key=lambda kv: -len(kv[1]))
         if len(ids) > 1
     ]
 
@@ -221,6 +272,7 @@ def build_digest(
         "branch_count": len(detail),
         "concluded": len(concluded),
         "shared_sources": shared_sources[:12],
+        "local_source_collisions": local_collisions[:12],
         "overlapping_claims": overlaps[:10],
         "open_conflicts": open_conflicts[:12],
         "unsynthesised": [d["branch"] for d in stale_branches],
@@ -243,6 +295,13 @@ def _demands(digest: Dict[str, Any]) -> List[str]:
             f"{len(shared)} 条文献被两条以上路线共用（如 {shared[0]['source'][:40]} 在 "
             + "、".join(shared[0]["branches"]) + "），要说明是同一份证据支撑两个结论，"
             "还是两条路线读了同一篇的不同部分"
+        )
+    collisions = digest.get("local_source_collisions") or []
+    if collisions:
+        out.append(
+            f"{len(collisions)} 处编号看着一样但其实是各课题自己的文献编号"
+            f"（如 {collisions[0]['source']}），不能当成共用证据；"
+            f"要确认是不是同一篇，得先补上 DOI / PMID / Zotero key"
         )
     overlaps = digest.get("overlapping_claims") or []
     flipped = [row for row in overlaps if row.get("hint") == "polarity_differs"]

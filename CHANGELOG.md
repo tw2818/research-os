@@ -54,6 +54,47 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop. The counters still decide when to ask - they are a checkpoint,
   not a judge.
 
+## [0.11.0] — 2026-10-25
+
+The rules come in layers, and the middle layer can be set aside on the
+record. A system that treats every rule as a law is a bureaucracy; a system
+that treats every rule as a suggestion is nothing at all.
+
+- **The floor, the controls, the advice, the goal.** The floor (a claim
+  without a source, a record changed without a trace, a premise that points
+  nowhere, a ledger written outside the tool) is never waived - it protects
+  the record itself. Three controls are good defaults and bad laws:
+  two routes before leaving divergence, a frozen plan before searching, a
+  review before writing. `action='waive'` sets one of them aside for the
+  stage it guards, with a reason that is required, kept in `waivers.json`,
+  shown in the injected block, written into the vault, and handed to the
+  reviewer - who judges the reason rather than the presence.
+- **The stage is a kind of research, not a number.** `mode='mapping'` joins
+  `systematic` and `exploratory`: building the map of an area commits to
+  its scope, because there is no claim to refute yet and demanding a
+  falsifier produces a formal sentence that refutes nothing - and teaches
+  the agent to write down things that are not true.
+- **Progress is not only a route being weakened.** The evidence stage and
+  the reviewer's "progression" axis now count knowing a previously unknown
+  fact, sharpening a concept, noticing an ignored variable and connecting
+  two fields as movement. A batch that neither decides a route nor enlarges
+  the space is the only one with no criterion.
+- **The reviewer does not reward caution.** Its instructions say that a
+  hedged project does not score for hedging, and that a clearly marked
+  hypothesis does not lose points for being bold. What loses points is
+  writing a hypothesis as a conclusion.
+- **A shared source has to resolve across topics.** "S1" is one topic's
+  library id, so two branches writing "S1" are two papers; the digest now
+  keys sources by DOI / PMID / Zotero key, and reports same-looking local
+  ids as `local_source_collisions` rather than as shared evidence.
+- **Confirming a directive is not the same as doing it.** `directive_progress`
+  compares the branch's acknowledgement with its own plan timestamp, and the
+  parent's block says which branches confirmed and did not move.
+- **The negated words were still in the stopword list.** `not`, `no` and
+  `never` are out, so "improved" and "did not improve" are no longer the
+  same token bag. Double negation ("not absent", "无不") is read as a
+  presence, and "not only" is not a negation.
+
 ## [0.10.0] — 2026-10-25
 
 - **A judgement may cite a branch's ledger.** An inference's premise can be

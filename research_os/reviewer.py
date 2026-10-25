@@ -48,13 +48,17 @@ DIMENSIONS: tuple[tuple[str, str, str], ...] = (
         "progression",
         "层层推进",
         "比上一轮多知道了什么？每一轮是否踩在前一轮的结论上，"
-        "还是在原地重新开始、或者绕回已经否掉的说法？",
+        "还是在原地重新开始、或者绕回已经否掉的说法？"
+        "知道了此前不知道的事实、把一个概念分得更清、发现一个被忽略的变量，"
+        "也是推进——只要它不是原地打转。",
     ),
     (
         "grounding",
         "证据匹配",
         "结论的强度和账本里的证据等级匹配吗？有没有把推理写成观察、"
-        "把单篇结果写成established、把假设当成结论？",
+        "把单篇结果写成established、把假设当成结论？"
+        "反过来也要看：这一轮是不是该有个明确标记的假说，"
+        "而项目只堆了材料没有提出任何说法？",
     ),
     (
         "convergence",
@@ -119,6 +123,8 @@ INSTRUCTIONS = """你在给一个科研项目做阶段性的全局审查。写�
 
 规则：
 - 你是审稿人，不是编辑。说得过去的项目就放行；有明显问题的才写进 blocking_issues。要求完美会让项目永远交不出来。
+- 不要奖励谨慎。一个处处加限定语、什么都不敢断言的项目不该因此拿高分；同样，一个明确标记为 hypothesis、大胆但可被推翻的机制假说也不该因此扣分。扣分的是把假设说成结论，不是有假设。
+- 如果材料里有一条例外（waiver），看它给的理由成不成立，而不是看它有没有——例外本身不是问题，无理由的例外才是。
 - 每个 blocking issue 必须指到具体位置：哪条主张、哪条路线、哪段叙事。指不到具体位置的抱怨不要写。
 - 不要发明证据。材料里没有的文献、数字、设计，不能当成已经存在的东西来评价。
 - 分数是给作者的信号，放行与否由阈值决定，这个阈值不告诉你，也不要猜。
@@ -151,6 +157,8 @@ def build_brief(
     branches: Optional[List[Dict[str, Any]]] = None,
     open_questions: Optional[List[Any]] = None,
     parent: str = "",
+    waivers: Optional[List[Dict[str, Any]]] = None,
+    mode: str = "",
 ) -> str:
     """The material the reviewer gets. Built from the state, not the last reply.
 
@@ -161,6 +169,13 @@ def build_brief(
     lines: List[str] = [f"项目：{topic}"]
     if parent:
         lines.append(f"这是一条分支，父课题：{parent}")
+    if waivers:
+        lines += ["", "## 本阶段声明的例外"]
+        for w in waivers:
+            lines.append(
+                f"- {w.get('label') or w.get('guard')}：{w.get('reason')}"
+                f"（阶段 {w.get('phase') or '不限'}）"
+            )
     lines += [
         "",
         "## 核心问题",
@@ -172,6 +187,14 @@ def build_brief(
         f"## 当前阶段",
         phase.strip() or "（没设）",
         "",
+    ]
+    if mode:
+        lines += [
+            "## 这一轮的科学活动类型",
+            mode.strip(),
+            "",
+        ]
+    lines += [
         "## 现在相信什么（课题叙事）",
         narrative.strip() or "（没写）",
         "",

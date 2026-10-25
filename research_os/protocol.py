@@ -22,6 +22,7 @@ try:
     # `state.py` and cannot go stale behind a reloaded entry module.
     from research_os_impl.state import (
         child_directive,
+        directive_progress,
         read_claims,
         read_contradictions,
         read_map,
@@ -35,6 +36,7 @@ except ImportError:
     try:
         from .state import (
             child_directive,
+            directive_progress,
             read_claims,
             read_contradictions,
             read_map,
@@ -47,6 +49,7 @@ except ImportError:
     except ImportError:  # loaded flat inside the Hermes plugin directory
         from state import (  # type: ignore[no-redef]
             child_directive,
+            directive_progress,
             read_claims,
             read_contradictions,
             read_map,
@@ -76,6 +79,11 @@ PHASES: dict[str, dict[str, str]] = {
         "thinking": (
             "这轮在确认科研状态，先不找证据。新课题：把核心问题、目标、"
             "为什么值得问、答案会是什么样子，和用户谈清楚再往下走。"
+            "同时判断这一轮的科学活动是哪一种：梳理一个领域（mapping）、"
+            "比较几种解释（exploratory）、验证一个已定的问题（systematic）、"
+            "整合已有分支、还是把结论写出来。"
+            "活动类型决定约束强度，不是所有任务都该被当成假设检验——"
+            "梳理领域的时候逼人先写否证条件，只会写出一句什么都不否证的话。"
             "老课题：先确认状态有没有变——问题还是不是那个问题，"
             "上一轮留下的话还算不算数。"
         ),
@@ -111,8 +119,13 @@ PHASES: dict[str, dict[str, str]] = {
             "这轮在找证据，外部文献或本地已有材料都行。"
             "每份材料都要挂在某条路线上：它在检验哪条路线的哪个预测？"
             "和路线无关的材料记成旁支，不要混进主线账本。"
-            "证据回来之后，先看它有没有把某条路线削弱——没削弱任何一条，"
-            "说明这批材料没有判据。"
+            "证据回来之后，先看它对这一轮意味着什么：它削弱了哪条路线、"
+            "支持了哪条、还是补上了此前不知道的事实。"
+            "最后这一种也是进展——知道了一个原先不知道的事实、把概念分得更清楚了、"
+            "发现了一个之前被忽略的变量、把两个领域连上了，"
+            "这些都在往前走，只是没有裁决任何一条路线。"
+            "只有当这批材料既没有改变判断、也没有让知识空间变大时，"
+            "才说明它没有判据。"
         ),
         "output": (
             "给出这批证据支持哪条路线、削弱哪条、还不确定哪条。"
@@ -356,7 +369,8 @@ THINKING_RULES = """回答前按科研的路子走：
 # administration, not research.
 TURN_DEMAND = """这轮要有新东西，别只复述已有内容。至少做到一件（按科研价值排序）：
 提出或改写一个可能答案｜说出区分两个答案的判据｜指出一个看着成立其实不成立的推论｜
-关掉一个待解问题｜明确说清这里无法定论｜新增一条带来源的断言。
+关掉一个待解问题｜明确说清这里无法定论｜新增一条带来源的断言｜
+把一个此前不知道的事实、或者一个被忽略的变量记下来（这也算进展，不必裁决任何一条路线）。
 做完整之后用 research_mode 记下来，例如 research_mode(action='claim', project='<课题>', claim={...})
 一次查出几条就一次记完：claims=[{...},{...}]，不用一条一个调用。\n（提解释用 action='contradict'，关问题用 action='question'，提假设用 action='hypothesis'）。"""
 
@@ -513,6 +527,22 @@ def _routes(topic: str) -> list[str]:
     ]
     if unread:
         out.append(f"下发过但子课题还没确认：{'、'.join(unread)}")
+    # Confirmed is not the same as done. The branch said it received the
+    # direction; whether its own plan moved afterwards is a different
+    # question, and the only one that changes what the parent should
+    # expect from it.
+    try:
+        stalled = [
+            row["branch"] for row in directive_progress(topic)
+            if row.get("state") == "已确认但计划没动"
+        ]
+    except Exception:
+        stalled = []
+    if stalled:
+        out.append(
+            f"确认了但计划没动：{'、'.join(stalled)}——指示收到了不等于照着做了，"
+            f"要么计划改成对着它做，要么说清为什么不做"
+        )
     if len(open_rows) > 2:
         out.append("（同时开着三条以上路线时，先收掉一条再开新的。）")
     # The gate's last word, in the phase that has to earn its way past it.
@@ -558,6 +588,15 @@ def _parent_directive(topic: str) -> list[str]:
     bits.append(f"优先级：{d.get('priority') or 'normal'}")
     if d.get("acknowledged_at"):
         bits.append("（已确认）")
+        try:
+            rows = [row for row in directive_progress(str(d.get("parent") or ""))
+                    if row.get("branch") == str(d.get("branch") or "")]
+        except Exception:
+            rows = []
+        if rows and not rows[0].get("plan_moved_after"):
+            bits.append(
+                "（确认了但计划没动：这轮要么照着做，要么在叙事里说清为什么不做）"
+            )
     else:
         bits.append(
             "（还没确认：先调 research_mode(action='acknowledge', "
